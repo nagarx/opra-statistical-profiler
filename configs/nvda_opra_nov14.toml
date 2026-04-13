@@ -1,0 +1,23 @@
+# Single day: Nov 14 (Friday) — has 0DTE contracts, NVDA ~$190
+[input]
+data_dir = "../data/OPRA/NVDA/cmbp1_2025-11-13_to_2025-11-25"
+filename_pattern = "opra-pillar-{date}.cmbp-1.dbn.zst"
+symbol = "NVDA"
+risk_free_rate = 0.05
+date_start = "2025-11-14"
+date_end = "2025-11-14"
+
+[trackers]
+quality = true
+spread = true
+zero_dte = true
+premium_decay = true
+
+[output]
+output_dir = "output_opra_nov14"
+
+[buckets]
+atm_range_pct = 0.02
+deep_range_pct = 0.10
+
+reservoir_capacity = 10000

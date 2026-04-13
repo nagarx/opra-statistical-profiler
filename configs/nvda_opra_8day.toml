@@ -1,0 +1,29 @@
+# Full 8-day OPRA NVDA options profiling
+# Date range: 2025-11-13 to 2025-11-24 (8 trading days)
+# Includes NVDA earnings (Nov 20 after close)
+
+[input]
+data_dir = "../data/OPRA/NVDA/cmbp1_2025-11-13_to_2025-11-25"
+filename_pattern = "opra-pillar-{date}.cmbp-1.dbn.zst"
+symbol = "NVDA"
+risk_free_rate = 0.05
+
+[trackers]
+quality = true
+spread = true
+premium_decay = true
+volume = true
+greeks = true
+zero_dte = true
+put_call = true
+effective_spread = true
+
+[output]
+output_dir = "output_opra_nvda"
+write_summaries = true
+
+[buckets]
+atm_range_pct = 0.02
+deep_range_pct = 0.10
+
+reservoir_capacity = 10000

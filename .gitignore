@@ -1,0 +1,11 @@
+/target/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Local development overrides (contains path patches for hft-statistics)
+.cargo/config.toml
+
+# Generated profiling output (data-dependent, not reproducible)
+output_opra_*/

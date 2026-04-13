@@ -1,0 +1,29 @@
+# Single-day test: Nov 17 (smallest file, 27 GB)
+# Used to validate end-to-end data ingestion before full run
+
+[input]
+data_dir = "../data/OPRA/NVDA/cmbp1_2025-11-13_to_2025-11-25"
+filename_pattern = "opra-pillar-{date}.cmbp-1.dbn.zst"
+symbol = "NVDA"
+risk_free_rate = 0.05
+date_start = "2025-11-17"
+date_end = "2025-11-17"
+
+[trackers]
+quality = true
+spread = true
+premium_decay = false
+volume = false
+greeks = false
+zero_dte = false
+put_call = false
+
+[output]
+output_dir = "output_opra_test"
+write_summaries = true
+
+[buckets]
+atm_range_pct = 0.02
+deep_range_pct = 0.10
+
+reservoir_capacity = 10000
