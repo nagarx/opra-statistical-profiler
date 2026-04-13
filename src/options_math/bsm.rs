@@ -252,8 +252,6 @@ pub fn minutes_to_years(minutes_remaining: f64) -> f64 {
 mod tests {
     use super::*;
 
-    const _EPS: f64 = 1e-6;
-
     #[test]
     fn test_norm_cdf_known_values() {
         assert!((norm_cdf(0.0) - 0.5).abs() < 1e-7);

@@ -163,6 +163,9 @@ Configuration is TOML-driven. All sections except `[input]` have defaults and ca
 ### Example Config
 
 ```toml
+# Top-level (must appear before any [section] header)
+reservoir_capacity = 10000
+
 [input]
 data_dir = "/path/to/opra/data"
 filename_pattern = "opra-pillar-{date}.cmbp-1.dbn.zst"
@@ -186,8 +189,6 @@ write_summaries = true
 [buckets]
 atm_range_pct = 0.02
 deep_range_pct = 0.10
-
-reservoir_capacity = 10000
 ```
 
 ## Output Format

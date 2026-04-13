@@ -795,7 +795,7 @@ Online mean/variance/std computation (Welford 1962). O(1) memory, numerically st
 
 Used for: per-day statistics (events, trades, contracts, volume, decay percentages, PCR), per-bucket spread/IV aggregation, per-size effective spread.
 
-Total instances across all trackers: ~68.
+Total instances across all trackers: ~71.
 
 ### StreamingDistribution
 
@@ -890,11 +890,16 @@ atm_range_pct = 0.02
 # Deep ITM/OTM boundary.
 # Default: 0.10 (10% from 1.0). Deep = ratio outside [0.90, 1.10].
 deep_range_pct = 0.10
+```
 
-# Reservoir capacity for StreamingDistribution instances.
-# Controls memory usage for quantile estimation.
-# Default: 10000
+**Note:** `reservoir_capacity` is a top-level field of `ProfilerConfig`, not part of `[buckets]`.
+It must appear before any `[section]` header in the TOML file:
+
+```toml
 reservoir_capacity = 10000
+
+[input]
+...
 ```
 
 ---

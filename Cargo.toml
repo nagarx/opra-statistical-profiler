@@ -7,7 +7,7 @@ authors = ["nagarx"]
 description = "High-performance statistical profiler for OPRA options microstructure analysis"
 license = "LicenseRef-Proprietary"
 readme = "README.md"
-keywords = ["options", "opra", "hft", "microstructure", "statistics", "greeks"]
+keywords = ["options", "opra", "hft", "microstructure", "greeks"]
 categories = ["finance", "science"]
 
 [lib]
