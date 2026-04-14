@@ -9,6 +9,7 @@ use serde_json::json;
 use hft_statistics::statistics::WelfordAccumulator;
 
 use crate::event::{DayContext, OptionsEvent};
+use crate::report_utils::{dte_bucket_index, DTE_LABELS};
 use crate::OptionsTracker;
 
 pub struct QualityTracker {
@@ -24,10 +25,9 @@ pub struct QualityTracker {
     day_events: u64,
     day_trades: u64,
     n_days: u32,
-    dte_0_events: u64,
-    dte_1_events: u64,
-    dte_weekly_events: u64,
-    dte_other_events: u64,
+    /// Per-DTE-bucket event counts, indexed by `report_utils::dte_bucket_index`.
+    /// Labels in `DTE_LABELS`: ["0dte", "1dte", "2_7dte", "other"].
+    dte_events: [u64; 4],
 }
 
 impl Default for QualityTracker {
@@ -51,10 +51,7 @@ impl QualityTracker {
             day_events: 0,
             day_trades: 0,
             n_days: 0,
-            dte_0_events: 0,
-            dte_1_events: 0,
-            dte_weekly_events: 0,
-            dte_other_events: 0,
+            dte_events: [0; 4],
         }
     }
 }
@@ -79,12 +76,7 @@ impl OptionsTracker for QualityTracker {
             self.sentinel_events += 1;
         }
 
-        match event.dte {
-            0 => self.dte_0_events += 1,
-            1 => self.dte_1_events += 1,
-            2..=7 => self.dte_weekly_events += 1,
-            _ => self.dte_other_events += 1,
-        }
+        self.dte_events[dte_bucket_index(event.dte)] += 1;
     }
 
     fn end_of_day(&mut self, _day_index: u32) {
@@ -145,10 +137,10 @@ impl OptionsTracker for QualityTracker {
                 "std": self.contracts_per_day.std(),
             },
             "dte_distribution": {
-                "dte_0": self.dte_0_events,
-                "dte_1": self.dte_1_events,
-                "dte_2_7": self.dte_weekly_events,
-                "dte_other": self.dte_other_events,
+                DTE_LABELS[0]: self.dte_events[0],
+                DTE_LABELS[1]: self.dte_events[1],
+                DTE_LABELS[2]: self.dte_events[2],
+                DTE_LABELS[3]: self.dte_events[3],
             },
         })
     }
@@ -194,9 +186,9 @@ mod tests {
         t.process_event(&e30, 3);
         t.end_of_day(0);
         let r = t.finalize();
-        assert_eq!(r["dte_distribution"]["dte_0"], 1);
-        assert_eq!(r["dte_distribution"]["dte_2_7"], 1);
-        assert_eq!(r["dte_distribution"]["dte_other"], 1);
+        assert_eq!(r["dte_distribution"]["0dte"], 1);
+        assert_eq!(r["dte_distribution"]["2_7dte"], 1);
+        assert_eq!(r["dte_distribution"]["other"], 1);
     }
 
     #[test]

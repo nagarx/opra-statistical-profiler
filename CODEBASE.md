@@ -13,7 +13,7 @@ High-performance statistical profiler for OPRA options microstructure analysis. 
 | Language | Rust (edition 2021, MSRV 1.82) |
 | Trackers | 8 |
 | Tests | 79 |
-| Source LOC | ~4,151 (21 files including binary) |
+| Source LOC | ~4,177 (21 files including binary) |
 | Throughput | ~4.1M events/sec |
 | Architecture | Single-pass composable tracker dispatch |
 | Input | OPRA CMBP-1 `.dbn.zst` (consolidated BBO + trades) |
@@ -127,7 +127,7 @@ Crate root. Declares public modules and the `OptionsTracker` trait.
 
 ---
 
-### src/config.rs (148 lines)
+### src/config.rs (153 lines)
 
 TOML-driven profiler configuration. All fields have defaults except `input.data_dir` and `input.filename_pattern`.
 
@@ -287,7 +287,7 @@ Opens the `.dbn.zst` file with 1 MB buffered reader, creates a `DynDecoder` with
 
 ---
 
-### src/profiler.rs (371 lines)
+### src/profiler.rs (377 lines)
 
 Single-pass profiling engine. Orchestrates file discovery, day processing, event enrichment, and tracker dispatch.
 
@@ -392,7 +392,7 @@ Factory functions for constructing synthetic `OptionsEvent` instances in tests. 
 
 ---
 
-### src/bin/profile_opra.rs (128 lines)
+### src/bin/profile_opra.rs (142 lines)
 
 CLI binary entry point.
 
@@ -401,7 +401,7 @@ CLI binary entry point.
 **Flow:**
 1. Parse `--config` argument
 2. Load `ProfilerConfig` from TOML file
-3. Load underlying prices from EQUS file or fallback (8-day NVDA Nov 2025 hardcoded)
+3. Load underlying prices: from EQUS file (hard error on load failure), or fallback to hardcoded 8-day NVDA Nov 2025 prices ONLY when `symbol = "NVDA"` (any other symbol without explicit prices file is rejected with a hard error)
 4. Instantiate enabled trackers based on `config.trackers.*` booleans
 5. Call `profiler::run()` then `profiler::write_output()`
 6. Log final summary with day count, event count, throughput
@@ -414,7 +414,7 @@ CLI binary entry point.
 
 ## 4. Options Math
 
-### BSM (src/options_math/bsm.rs, 440 lines, 19 tests)
+### BSM (src/options_math/bsm.rs, 438 lines, 19 tests)
 
 Black-Scholes-Merton European option pricing, implied volatility solver, and Greek computation.
 
@@ -639,7 +639,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 
 ---
 
-### 5.5 GreeksTracker (src/trackers/greeks.rs, 271 lines, 4 tests)
+### 5.5 GreeksTracker (src/trackers/greeks.rs, 274 lines, 4 tests)
 
 **Purpose:** Implied volatility and Greek computation for ATM options. Computes IV from BSM for ATM contracts by DTE bucket. Tracks delta, gamma, vega distributions for 0DTE ATM.
 
@@ -851,7 +851,8 @@ filename_pattern = "opra-pillar-{date}.cmbp-1.dbn.zst"
 symbol = "NVDA"
 
 # Path to EQUS OHLCV .dbn.zst file for underlying open/close prices.
-# Optional. Falls back to hardcoded NVDA 8-day prices if absent.
+# Optional. Falls back to hardcoded NVDA 8-day prices ONLY when symbol = "NVDA";
+# any other symbol without this file produces a hard error.
 underlying_prices_file = "../data/EQUS/nvda_ohlcv.dbn.zst"
 
 # Annualized risk-free rate for BSM calculations.
@@ -939,6 +940,14 @@ The IV computation sampling interval (every Nth ATM quote) is configurable via t
 ### D8: day_epoch_ns unused by trackers
 
 `DayContext.day_epoch_ns` (midnight UTC in nanoseconds) is computed by the profiler using `hft_statistics::time::regime::day_epoch_ns()` and passed to all trackers via `begin_day()`, but no tracker currently reads it. It is reserved for future extensions that may need absolute day-boundary timestamps (e.g., pre-market/post-market analysis, cross-day sequence alignment).
+
+### D9: Strict TOML parsing (deny_unknown_fields)
+
+All 5 config structs (`ProfilerConfig`, `InputConfig`, `TrackerConfig`, `OutputConfig`, `BucketConfig`) use `#[serde(deny_unknown_fields)]`. This rejects typos and misplaced keys at parse time with a clear error like `"unknown field reservoir_capacity, expected atm_range_pct or deep_range_pct"`. The motivation: a previous incarnation of the configs placed `reservoir_capacity` under `[buckets]` (incorrect — it is a top-level field), and serde silently ignored it. The bug was invisible because the configured value matched the default. Strict parsing eliminates this entire class of silent-misconfiguration bugs. Trade-off: introducing a new optional field in a future version becomes a "backward-incompatible" change for users with stricter older parsers — schema versioning may be added later if needed.
+
+### D10: NVDA-only fallback safety constraint
+
+The CLI binary's built-in fallback prices (`load_nvda_fallback_prices()` in `src/bin/profile_opra.rs`) are NVDA-specific (8 trading days in November 2025). The binary REFUSES to use the fallback for any symbol other than `"NVDA"` (`profile_opra.rs:45-51` exits with a hard error). It also REFUSES to silently fall back to NVDA prices when an explicit `underlying_prices_file` fails to load (`profile_opra.rs:33-39`). And the profiler library itself REFUSES to silently use a 0.0 underlying price when no daily price is found (`profiler.rs:75-83`). The motivation: silent symbol mismatch produced silently wrong moneyness classification and silently wrong Greeks. All three guardrails turn previously silent failures into hard errors with actionable messages. The fallback survives only as a development convenience for the original NVDA Nov 2025 dataset; removal is planned for v0.2.0.
 
 ---
 

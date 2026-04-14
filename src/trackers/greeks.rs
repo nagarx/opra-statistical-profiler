@@ -21,7 +21,7 @@ pub struct GreeksTracker {
     dte0_atm_call_iv: StreamingDistribution,
     dte0_atm_put_iv: StreamingDistribution,
 
-    // Intraday IV curve (390-bin) for 0DTE ATM calls
+    // Intraday IV curve (390-bin) for 0DTE ATM contracts (both calls and puts contribute)
     dte0_atm_iv_curve: IntradayCurveAccumulator,
 
     // Delta/gamma for 0DTE ATM
