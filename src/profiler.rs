@@ -15,7 +15,7 @@ use crate::loader::Cmbp1Loader;
 use crate::options_math::moneyness::{Moneyness, MoneynessBuckets};
 use crate::OptionsTracker;
 
-use hft_statistics::time::regime::{utc_offset_for_date, day_epoch_ns};
+use hft_statistics::time::regime::{utc_offset_for_date, midnight_utc_ns};
 
 const SENTINEL_I64: i64 = i64::MAX;
 
@@ -67,7 +67,7 @@ pub fn run(
             .ok_or_else(|| format!("Invalid date: {}", date_str))?;
 
         let utc_offset = utc_offset_for_date(year, month, day);
-        let day_epoch = day_epoch_ns(year, month, day, utc_offset);
+        let day_epoch = midnight_utc_ns(year, month, day);
 
         // Underlying price is REQUIRED for moneyness classification and BSM Greeks.
         // Falling back silently to 0.0 would NaN-poison moneyness for the entire day
