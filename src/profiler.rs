@@ -69,14 +69,20 @@ pub fn run(
         let utc_offset = utc_offset_for_date(year, month, day);
         let day_epoch = day_epoch_ns(year, month, day, utc_offset);
 
+        // Underlying price is REQUIRED for moneyness classification and BSM Greeks.
+        // Falling back silently to 0.0 would NaN-poison moneyness for the entire day
+        // and silently misclassify every contract as OTM. Hard error instead.
         let underlying_px = underlying_prices
             .iter()
-            .find(|p| p.date == trading_date);
-        let underlying_open = underlying_px.map(|p| p.open).unwrap_or_else(|| {
-            log::warn!("No underlying price for {}; using 0.0", date_str);
-            0.0
-        });
-        let underlying_close = underlying_px.map(|p| p.close).unwrap_or(0.0);
+            .find(|p| p.date == trading_date)
+            .ok_or_else(|| {
+                format!(
+                    "No underlying price for trading date {}. Configure underlying_prices_file to cover this date, or extend the built-in fallback prices.",
+                    date_str
+                )
+            })?;
+        let underlying_open = underlying_px.open;
+        let underlying_close = underlying_px.close;
 
         let day_ctx = DayContext {
             trading_date,

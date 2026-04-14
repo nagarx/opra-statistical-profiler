@@ -20,7 +20,7 @@ High-performance statistical profiler for OPRA options microstructure analysis. 
 | Output | Numbered JSON files with `_provenance` metadata |
 
 **Dependencies:**
-- `hft-statistics` (git, github.com/nagarx/hft-statistics.git, branch main) -- Welford, streaming distribution, intraday curve accumulator, DST-aware time utilities
+- `hft-statistics` (git, github.com/nagarx/hft-statistics.git, pinned to rev `e976ff7`) -- Welford, streaming distribution, intraday curve accumulator, DST-aware time utilities
 - `dbn` v0.20.0 (git, github.com/databento/dbn.git) -- Databento binary format decoder
 - `ahash` 0.8 -- Fast hashing for contract maps and unique contract sets
 - `serde` + `serde_json` + `toml` -- Serialization, JSON output, TOML config
@@ -104,7 +104,7 @@ write_output():
 
 **File discovery:** `discover_files()` scans `data_dir` for files matching `filename_pattern` with `{date}` placeholder (YYYYMMDD). Filters by optional `date_start`/`date_end` (inclusive, YYYY-MM-DD format). Results sorted chronologically.
 
-**Underlying prices:** Loaded from EQUS OHLCV `.dbn.zst` via `load_underlying_prices_from_equs()`. Decodes `OhlcvMsg` records, converts nanodollar prices to USD. Falls back to hardcoded NVDA prices for 8-day Nov 2025 window if no file configured.
+**Underlying prices:** Loaded from EQUS OHLCV `.dbn.zst` via `load_underlying_prices_from_equs()`. Decodes `OhlcvMsg` records, converts nanodollar prices to USD. Falls back to hardcoded NVDA prices for 8-day Nov 2025 window **only when `symbol = "NVDA"`** — non-NVDA symbols without `underlying_prices_file` produce a hard error. Trading dates with no available underlying price (whether from file or fallback) also produce a hard error to prevent silent NaN-poisoning of moneyness classification.
 
 ---
 
@@ -140,6 +140,8 @@ TOML-driven profiler configuration. All fields have defaults except `input.data_
 | `TrackerConfig` | 8 booleans (one per tracker) | Which trackers to enable |
 | `OutputConfig` | `output_dir`, `write_summaries` | Output paths |
 | `BucketConfig` | `atm_range_pct`, `deep_range_pct` | Moneyness classification thresholds |
+
+All 5 structs use `#[serde(deny_unknown_fields)]` — typos or misplaced keys cause a parse error with a clear "unknown field X, expected Y or Z" message. This catches the class of bug where a top-level field is accidentally placed under a section header.
 
 **Defaults:**
 
@@ -406,7 +408,7 @@ CLI binary entry point.
 
 **Tracker instantiation order:** QualityTracker, SpreadTracker, ZeroDteTracker, PremiumDecayTracker, VolumeTracker, GreeksTracker, PutCallRatioTracker, OptionsEffectiveSpreadTracker.
 
-**Fallback prices:** 8 NVDA trading days (2025-11-13 to 2025-11-24), open/close from EQUS OHLCV. Used when no `underlying_prices_file` is configured.
+**Fallback prices:** 8 NVDA trading days (2025-11-13 to 2025-11-24), open/close from EQUS OHLCV. Used when no `underlying_prices_file` is configured AND `symbol = "NVDA"`. Any other symbol without explicit prices file is rejected with a hard error.
 
 ---
 
@@ -656,7 +658,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 **Important:** `atm_quote_count` is NOT reset across days -- it is a continuous counter (see D4).
 
 **Time-to-expiry calculation:**
-- 0DTE: Estimate minutes remaining from timestamp. Close at 16:00 ET. `remaining_ns = (close_utc_ns - event_tod_ns).max(0)`. Convert to minutes, then `bsm::minutes_to_years()` (252-day year, 390 min/day).
+- 0DTE: Estimate minutes remaining from timestamp. Close at 16:00 ET. `remaining_ns = (close_utc_ns - event_tod_ns).max(0)`. Convert to minutes, **clamp to `min(390.0)`** so that pre-market events (e.g., 04:00 ET) correctly map to one full RTH session of trading time rather than the inflated calendar interval. Then `bsm::minutes_to_years()` (252-day year, 390 min/day).
 - Non-0DTE: `dte as f64 / 365.0` (calendar days, see D2). Clamped to min 1e-6.
 
 **IV filter:** Only accepts IV where `sigma.is_finite() && sigma > 0.0 && sigma < 5.0` (see D3). Outside this range counts as `iv_failed`.

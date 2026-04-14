@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 /// Top-level profiler configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProfilerConfig {
     pub input: InputConfig,
     #[serde(default)]
@@ -19,6 +20,7 @@ pub struct ProfilerConfig {
 
 /// Input data source configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InputConfig {
     /// Directory containing OPRA `.dbn.zst` files.
     pub data_dir: PathBuf,
@@ -39,6 +41,7 @@ pub struct InputConfig {
 
 /// Which trackers to enable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrackerConfig {
     #[serde(default = "default_true")]
     pub quality: bool,
@@ -75,6 +78,7 @@ impl Default for TrackerConfig {
 
 /// Output configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     #[serde(default = "default_output_dir")]
     pub output_dir: PathBuf,
@@ -93,6 +97,7 @@ impl Default for OutputConfig {
 
 /// Bucketing configuration for DTE and moneyness analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BucketConfig {
     /// ATM range as fraction of underlying price. Default: 0.02 (+/- 2%).
     #[serde(default = "default_atm_range")]

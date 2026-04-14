@@ -107,7 +107,10 @@ impl OptionsTracker for GreeksTracker {
             let close_utc_ns: i64 = (close_et_hour - self.utc_offset as i64) * 3600 * 1_000_000_000;
             let event_tod_ns = event.ts_event % (24 * 3600 * 1_000_000_000_i64);
             let remaining_ns = (close_utc_ns - event_tod_ns).max(0);
-            let remaining_minutes = remaining_ns as f64 / 60_000_000_000.0;
+            // Clamp to RTH session length (390 min). Pre-market events (e.g., 04:00 ET)
+            // would otherwise compute 720 min via calendar arithmetic, but trading-time
+            // remaining is at most a full RTH session.
+            let remaining_minutes = (remaining_ns as f64 / 60_000_000_000.0).min(390.0);
             bsm::minutes_to_years(remaining_minutes)
         } else {
             (event.dte as f64 / 365.0).max(1e-6)

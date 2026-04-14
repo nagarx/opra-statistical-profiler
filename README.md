@@ -82,7 +82,7 @@ The profiler has no dependency on `mbo-lob-reconstructor` or `mbo-statistical-pr
 ## Build Prerequisites
 
 - **Rust 1.82+** (edition 2021)
-- **hft-statistics** -- fetched automatically from GitHub: `https://github.com/nagarx/hft-statistics.git` (branch `main`)
+- **hft-statistics** -- fetched automatically from GitHub: `https://github.com/nagarx/hft-statistics.git` (pinned to commit `e976ff7`)
 - **dbn v0.20.0** -- fetched automatically from GitHub: `https://github.com/databento/dbn.git` (tag `v0.20.0`)
 
 No other external system dependencies required. All crate dependencies are resolved by Cargo.
@@ -109,11 +109,13 @@ The `RUST_LOG` environment variable controls log verbosity (`info`, `debug`, `wa
 
 The profiler reads OPRA CMBP-1 `.dbn.zst` files (Databento format). You must adjust `data_dir` in your config to point to the directory containing your `.dbn.zst` files. The filename pattern uses `{date}` as a placeholder for the 8-digit date (YYYYMMDD).
 
-Optionally provide an EQUS OHLCV `.dbn.zst` file via `underlying_prices_file` for accurate underlying prices. If not provided, the binary falls back to built-in NVDA prices for the 8-day November 2025 window.
+Optionally provide an EQUS OHLCV `.dbn.zst` file via `underlying_prices_file` for accurate underlying prices. If not provided, the binary falls back to built-in NVDA prices for the 8-day November 2025 window. **The fallback only applies when `symbol = "NVDA"`** — any other symbol without `underlying_prices_file` is rejected with a hard error to prevent silent wrong-symbol pricing. Trading dates with no available underlying price (whether from file or fallback) also produce a hard error.
 
 ## Configuration Reference
 
 Configuration is TOML-driven. All sections except `[input]` have defaults and can be omitted.
+
+**Strict parsing**: All config structs use `#[serde(deny_unknown_fields)]`. Typos or misplaced keys (e.g., putting `reservoir_capacity` under `[buckets]` instead of top-level) produce a clear parse error rather than being silently ignored.
 
 ### `[input]` -- Data Source (required)
 
@@ -231,7 +233,7 @@ The `config` field embeds the full TOML configuration used for the run, enabling
 
 | Crate | Version / Source | Purpose |
 |-------|-----------------|---------|
-| `hft-statistics` | git: `github.com/nagarx/hft-statistics.git` (main) | Statistical primitives: Welford, StreamingDistribution, IntradayCurveAccumulator, DST-aware time |
+| `hft-statistics` | git: `github.com/nagarx/hft-statistics.git` (rev `e976ff7`) | Statistical primitives: Welford, StreamingDistribution, IntradayCurveAccumulator, DST-aware time |
 | `dbn` | git: `github.com/databento/dbn.git` (v0.20.0) | CMBP-1 `.dbn.zst` decoding, `CbboMsg` record type, metadata/symbology |
 | `ahash` | 0.8 | High-performance hashing for contract maps and unique-contract sets |
 | `serde` | 1.0 (with `derive`) | Serialization/deserialization for config and report types |

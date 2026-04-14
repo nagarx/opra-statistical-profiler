@@ -24,7 +24,7 @@
 use std::f64::consts::PI;
 
 /// Minimum time-to-expiry to avoid division by zero.
-/// Equivalent to ~1 second of trading time.
+/// 1e-6 years ≈ 5.9 trading seconds (252 trading days × 390 min/day) ≈ 31.5 calendar seconds.
 const MIN_T: f64 = 1e-6;
 
 /// Maximum IV iterations for Newton-Raphson.

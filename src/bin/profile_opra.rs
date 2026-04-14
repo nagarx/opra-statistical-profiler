@@ -28,16 +28,30 @@ fn main() {
 
     let underlying_prices = match &config.input.underlying_prices_file {
         Some(path) => {
+            // Hard error on file-load failure. Silently falling back to NVDA prices
+            // would produce wrong moneyness/Greeks for any non-NVDA symbol.
             match profiler::load_underlying_prices_from_equs(path) {
                 Ok(prices) => prices,
                 Err(e) => {
-                    log::warn!("Failed to load EQUS prices from {}: {}. Using fallback.", path.display(), e);
-                    load_nvda_fallback_prices()
+                    eprintln!("Failed to load EQUS prices from {}: {}", path.display(), e);
+                    std::process::exit(1);
                 }
             }
         }
         None => {
-            log::info!("No underlying_prices_file configured; using built-in NVDA fallback prices");
+            // Built-in fallback is hardcoded to NVDA prices for Nov 2025. Refuse to use
+            // it for any other symbol — silent symbol mismatch produces silently wrong
+            // moneyness classification and Greek computation.
+            if config.input.symbol != "NVDA" {
+                eprintln!(
+                    "No underlying_prices_file configured for symbol '{}'. Built-in fallback prices are NVDA-only. Configure underlying_prices_file in [input].",
+                    config.input.symbol
+                );
+                std::process::exit(1);
+            }
+            log::warn!(
+                "No underlying_prices_file configured; using built-in NVDA fallback prices (Nov 13-24, 2025 only). Provide underlying_prices_file for any other date range."
+            );
             load_nvda_fallback_prices()
         }
     };

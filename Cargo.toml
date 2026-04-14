@@ -15,7 +15,7 @@ name = "opra_statistical_profiler"
 path = "src/lib.rs"
 
 [dependencies]
-hft-statistics = { git = "https://github.com/nagarx/hft-statistics.git", branch = "main" }
+hft-statistics = { git = "https://github.com/nagarx/hft-statistics.git", rev = "e976ff720a34efe4f6f753b08e34c23c7363286c" }
 dbn = { git = "https://github.com/databento/dbn.git", tag = "v0.20.0" }
 
 ahash = "0.8"
