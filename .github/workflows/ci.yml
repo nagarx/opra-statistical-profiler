@@ -37,12 +37,20 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Force cargo to use the system `git` binary for fetches so that the
+  # `git config --global url.X.insteadOf` PAT-injection step (in each
+  # compile job below) is honored when cargo resolves git deps. Default
+  # cargo uses bundled libgit2 which can silently ignore .gitconfig
+  # insteadOf in CI containers, causing private-dep clones to fail.
+  # Mirrors feature-extractor-MBO-LOB/.github/workflows/ci.yml pattern.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # fmt does NOT fetch deps (no compile), so no PAT injection required.
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -57,6 +65,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+      - name: Configure git for private deps (hft-statistics)
+        env:
+          GH_PAT: ${{ secrets.CROSS_REPO_PAT }}
+        run: |
+          git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -72,6 +85,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+      - name: Configure git for private deps (hft-statistics)
+        env:
+          GH_PAT: ${{ secrets.CROSS_REPO_PAT }}
+        run: |
+          git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -90,6 +108,11 @@ jobs:
       RUSTDOCFLAGS: '-D warnings'
     steps:
       - uses: actions/checkout@v5
+      - name: Configure git for private deps (hft-statistics)
+        env:
+          GH_PAT: ${{ secrets.CROSS_REPO_PAT }}
+        run: |
+          git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -107,6 +130,11 @@ jobs:
     # care about; dev-tooling runs on stable.
     steps:
       - uses: actions/checkout@v5
+      - name: Configure git for private deps (hft-statistics)
+        env:
+          GH_PAT: ${{ secrets.CROSS_REPO_PAT }}
+        run: |
+          git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
       - uses: dtolnay/rust-toolchain@1.82
       - uses: Swatinem/rust-cache@v2
         with:
