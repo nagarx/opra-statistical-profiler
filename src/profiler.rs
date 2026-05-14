@@ -15,15 +15,19 @@ use crate::loader::Cmbp1Loader;
 use crate::options_math::moneyness::{Moneyness, MoneynessBuckets};
 use crate::OptionsTracker;
 
-use hft_statistics::time::regime::{utc_offset_for_date, midnight_utc_ns};
+use hft_statistics::time::regime::{midnight_utc_ns, utc_offset_for_date};
 
 const SENTINEL_I64: i64 = i64::MAX;
-
 
 /// Profiling result.
 pub struct ProfileResult {
     pub n_days: u32,
     pub total_events: u64,
+    /// Cumulative count of CMBP-1 records whose decoding failed and were skipped
+    /// across all days. Surfaced via `_provenance.diagnostics.decode_errors` in the
+    /// per-tracker JSON output. Closes F-003 per hft-rules §8 (record diagnostics,
+    /// never silently drop).
+    pub total_decode_errors: u64,
     pub elapsed_secs: f64,
     pub reports: Vec<(String, serde_json::Value)>,
 }
@@ -55,6 +59,7 @@ pub fn run(
     };
 
     let mut total_events: u64 = 0;
+    let mut total_decode_errors: u64 = 0;
     let mut day_index: u32 = 0;
 
     for (i, (date_str, file_path)) in files.iter().enumerate() {
@@ -97,20 +102,23 @@ pub fn run(
         }
 
         let loader = Cmbp1Loader::new(file_path)?;
-        let (metadata, records) = loader.open()?;
+        let (metadata, mut records) = loader.open()?;
 
         let dbn_date = time::Date::from_calendar_date(
             year,
             time::Month::try_from(month as u8).map_err(|e| format!("Invalid month: {}", e))?,
             day as u8,
-        ).map_err(|e| format!("Invalid date for symbology: {}", e))?;
+        )
+        .map_err(|e| format!("Invalid date for symbology: {}", e))?;
 
         let contract_map = ContractMap::from_dbn_metadata(&metadata, dbn_date);
 
         let mut day_events: u64 = 0;
         let underlying_estimate = underlying_open;
 
-        for record in records {
+        // `records.by_ref()` keeps the iterator alive after the loop so we can read
+        // the cumulative `decode_errors` counter below (F-003 fix; see loader.rs).
+        for record in records.by_ref() {
             let contract = match contract_map.get(record.hd.instrument_id) {
                 Some(c) => c,
                 None => continue,
@@ -149,7 +157,11 @@ pub fn run(
                 action,
                 side,
                 trade_price,
-                trade_size: if action == Action::Trade { record.size } else { 0 },
+                trade_size: if action == Action::Trade {
+                    record.size
+                } else {
+                    0
+                },
                 bid_px,
                 ask_px,
                 bid_sz: record.levels[0].bid_sz,
@@ -169,6 +181,11 @@ pub fn run(
 
             day_events += 1;
         }
+
+        // Harvest day-level decode_errors BEFORE `records` goes out of scope at the
+        // end of this loop iteration (F-003 — closes silent decode-error swallow).
+        let day_decode_errors = records.decode_errors();
+        total_decode_errors += day_decode_errors;
 
         for tracker in trackers.iter_mut() {
             tracker.end_of_day(day_index);
@@ -220,6 +237,7 @@ pub fn run(
     Ok(ProfileResult {
         n_days: day_index,
         total_events,
+        total_decode_errors,
         elapsed_secs: elapsed,
         reports,
     })
@@ -252,6 +270,9 @@ pub fn write_output(
         "total_events": result.total_events,
         "runtime_secs": result.elapsed_secs,
         "throughput_events_per_sec": result.total_events as f64 / result.elapsed_secs.max(0.001),
+        "diagnostics": {
+            "decode_errors": result.total_decode_errors,
+        },
         "config": serde_json::to_value(config).unwrap_or_default(),
     });
 
@@ -350,9 +371,8 @@ pub fn load_underlying_prices_from_equs(
     while let Some(record) = decoder.decode_record::<OhlcvMsg>()? {
         let ts_secs = record.hd.ts_event / 1_000_000_000;
         let days_since_epoch = ts_secs / 86400;
-        let date = chrono::NaiveDate::from_num_days_from_ce_opt(
-            (days_since_epoch + 719_163) as i32,
-        );
+        let date =
+            chrono::NaiveDate::from_num_days_from_ce_opt((days_since_epoch + 719_163) as i32);
 
         if let Some(d) = date {
             let open = record.open as f64 / 1e9;

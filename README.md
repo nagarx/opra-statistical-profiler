@@ -73,7 +73,7 @@ The profiler has no dependency on `mbo-lob-reconstructor` or `mbo-statistical-pr
 | 1 | **QualityTracker** | Event counts (total, quote, trade), quote-to-trade ratio, unique contracts per day, events/trades/contracts per day (Welford mean/std), sentinel ratio, per-DTE bucket event distribution (0DTE, 1DTE, 2-7DTE, other) |
 | 2 | **SpreadTracker** | BBO bid-ask spread in USD and as percentage of mid-price. Breakdown by DTE bucket (4) and moneyness (5). 390-bin intraday spread and mid-price curves for 0DTE ATM contracts. Reservoir-sampled quantiles for all distributions |
 | 3 | **ZeroDteTracker** | ATM 0DTE focused analysis: per-minute intraday curves for spread, premium (option mid-price), trade volume, and trade count. Aggregate distributions for call/put spread, call/put premium, trade size, and bid-ask size imbalance |
-| 4 | **PremiumDecayTracker** | Theta decay curves for 0DTE ATM options: actual call and put premium by minute (390 bins), premium-to-spread ratio curves, daily open-to-close decay percentage (Welford statistics across days) |
+| 4 | **PremiumDecayTracker** | Premium decay curves for 0DTE ATM options: actual call and put premium by minute (390 bins), premium-to-spread ratio curves, daily open-to-close decay percentage (Welford statistics across days). (BSM-theoretical theta comparison reserved for future work — see CODEBASE.md D5.) |
 | 5 | **VolumeTracker** | Trade volume and count by DTE bucket and moneyness. Call vs put volume totals, trade size distributions (overall, call, put), intraday volume curves (all options and 0DTE-only), daily volume/trade statistics, 0DTE volume share |
 | 6 | **GreeksTracker** | Implied volatility via BSM Newton-Raphson solver (Brenner-Subrahmanyam 1988 initial guess). IV by DTE bucket, 390-bin intraday IV curve for 0DTE ATM contracts (both calls and puts contribute). Delta, gamma, vega distributions for 0DTE ATM. IV sampled every 100th ATM quote for throughput |
 | 7 | **PutCallRatioTracker** | Daily put-call ratio by volume and by trade count. Separate 0DTE PCR. 390-bin intraday PCR curves (all options and 0DTE-only), computed from separate call/put volume accumulators |
@@ -259,12 +259,13 @@ Fat LTO and single codegen unit maximize throughput for the streaming event loop
 
 ## Test Coverage
 
-79 unit tests across 12 source files.
+84 unit tests + 1 ignored across 13 source files. The ignored test is the F-013 / FIND-UFO contract-lock (intraday underlying-price reflection) — pending Axis L decision on the underlying-feed merge architecture.
 
 | Module | Tests | Coverage |
 |--------|-------|----------|
 | OCC symbol parsing (`contract.rs`) | 12 | Standard symbols, edge cases (6-char roots, penny strikes, leap year expiries), malformed input |
-| BSM pricing + IV (`options_math/bsm.rs`) | 19 | Call/put pricing, IV Newton-Raphson convergence, Greeks (delta, gamma, vega, theta, rho), edge cases (deep ITM/OTM, near-expiry, zero time) |
+| BSM pricing + IV (`options_math/bsm.rs`) | 18 | Call/put pricing, IV Newton-Raphson convergence, Greeks (delta, gamma, vega), edge cases (deep ITM/OTM, near-expiry, zero time). (Theta + rho not implemented; theta deleted 2026-05-08 F-017 cleanup pending time-system unit alignment.) |
+| BBO accessors (`event.rs`) | 6 + 1 ignored | F-NEW-R5-1 boundary-predicate consistency: normal/locked/crossed/NaN-bid/NaN-ask invariants across `option_mid` / `spread` / `spread_pct` / `has_valid_bbo` + parametric cross-accessor finiteness lock. 1 ignored F-013 contract-lock test pending Axis L. |
 | Moneyness classification (`options_math/moneyness.rs`) | 11 | ATM/ITM/OTM/Deep boundaries for calls and puts, edge cases at bucket boundaries |
 | Report utilities (`report_utils.rs`) | 4 | DTE bucketing, moneyness indexing, curve finalization |
 | QualityTracker | 4 | Event counting, quote/trade classification, DTE distribution, multi-day aggregation |
@@ -284,9 +285,11 @@ cargo test
 
 ## Design Decisions and Known Limitations
 
-### Underlying Price Frozen at Day Open
+### Underlying Price Frozen at Day Open (F-013 / FIND-UFO — fix pending Axis L)
 
-OPRA data contains only options quotes and trades -- it does not include equity market quotes. The profiler uses the underlying stock's opening price (from EQUS OHLCV or built-in fallback) as the underlying estimate for the entire trading day. This means moneyness classification and BSM Greek computation use a static underlying price that does not track intraday equity moves. This is the best estimate available given the data; a live feed would require fusing OPRA with a separate equity data source.
+OPRA data contains only options quotes and trades -- it does not include equity market quotes. The profiler currently uses the underlying stock's opening price (from EQUS OHLCV or built-in fallback) as the underlying estimate for the entire trading day (`profiler.rs:111` — `let underlying_estimate = underlying_open;`). This means moneyness classification and BSM Greek computation use a static underlying price that does not track intraday equity moves.
+
+This is tracked as F-013 / FIND-UFO in the OPRA investigation (see `opra_investigation/01_audit_architecture_data_flow.md` and `HANDOFF_FOR_DESIGN_AND_IMPLEMENTATION.md` §4). The post-fix contract is locked by an `#[ignore]`-gated regression test (`event.rs::tests::test_intraday_underlying_reflected_in_event_underlying_price`) that documents what the future fix must satisfy. Fix requires deciding Axis L (L.1 EQUS-embed / L.2 pre-pass / L.3 k-way merge / L.4 60s snapshot / L.5 forward-fill) — out of scope for the 2026-05-08 Phase 1 surgical-fix cycle.
 
 ### Time-to-Expiry Convention
 

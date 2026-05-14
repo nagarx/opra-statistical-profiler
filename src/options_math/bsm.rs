@@ -68,8 +68,7 @@ fn erfc_approx(x: f64) -> f64 {
     let t = 1.0 / (1.0 + 0.3275911 * x);
     let poly = t
         * (0.254829592
-            + t * (-0.284496736
-                + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
     poly * (-x * x).exp()
 }
 
@@ -160,25 +159,15 @@ pub fn gamma(s: f64, k: f64, t: f64, r: f64, sigma: f64) -> f64 {
     norm_pdf(d1) / (s * sigma * t.sqrt())
 }
 
-/// BSM theta (per calendar day, negative for long positions).
-///
-/// Call theta = -S*N'(d1)*sigma/(2*sqrt(T)) - r*K*e^(-rT)*N(d2)
-/// Put theta  = -S*N'(d1)*sigma/(2*sqrt(T)) + r*K*e^(-rT)*N(-d2)
-///
-/// Divided by 365 to express as per-calendar-day.
-pub fn theta(s: f64, k: f64, t: f64, r: f64, sigma: f64, is_call: bool) -> f64 {
-    if t < MIN_T || sigma < MIN_IV || s <= 0.0 || k <= 0.0 {
-        return 0.0;
-    }
-    let (d1, d2) = d1_d2(s, k, t, r, sigma);
-    let term1 = -s * norm_pdf(d1) * sigma / (2.0 * t.sqrt());
-    let annual_theta = if is_call {
-        term1 - r * k * (-r * t).exp() * norm_cdf(d2)
-    } else {
-        term1 + r * k * (-r * t).exp() * norm_cdf(-d2)
-    };
-    annual_theta / 365.0
-}
+// `theta()` was deleted in 2026-05-08 cleanup (F-017 in opra_investigation/02_audit_math_correctness.md).
+//
+// Rationale: the prior implementation divided `annual_theta / 365.0` (calendar-day units),
+// but `minutes_to_years()` below uses 252 trading days × 390 minutes (trading-time units).
+// The two were never composed in production (`bsm::theta` had zero production callers; only
+// test invocations existed), so the latent unit mismatch had zero blast radius. Re-introducing
+// theta MUST align unit systems with `minutes_to_years()` — either compute per-trading-minute
+// theta or convert `t` back to calendar-time before dividing. Adopt only after the project
+// makes an explicit time-system policy decision.
 
 /// Implied volatility via Newton-Raphson with Brenner-Subrahmanyam (1988) initial guess.
 ///
@@ -349,12 +338,6 @@ mod tests {
     }
 
     #[test]
-    fn test_theta_negative_for_long_call() {
-        let th = theta(100.0, 100.0, 0.25, 0.05, 0.20, true);
-        assert!(th < 0.0, "Long call theta should be negative, got {}", th);
-    }
-
-    #[test]
     fn test_vega_positive() {
         let v = vega(100.0, 100.0, 0.25, 0.05, 0.20);
         assert!(v > 0.0, "Vega should be positive, got {}", v);
@@ -406,7 +389,11 @@ mod tests {
         let iv = implied_vol(price, 190.0, 190.0, t, 0.05, true);
         assert!(iv.is_some(), "Should find IV for 0DTE ATM");
         let sigma = iv.unwrap();
-        assert!(sigma > 0.10 && sigma < 5.0, "0DTE IV={} seems unreasonable", sigma);
+        assert!(
+            sigma > 0.10 && sigma < 5.0,
+            "0DTE IV={} seems unreasonable",
+            sigma
+        );
     }
 
     #[test]
@@ -432,7 +419,6 @@ mod tests {
         let _ = put_price(190.0, 190.0, t, 0.05, 0.30);
         let _ = delta(190.0, 190.0, t, 0.05, 0.30, true);
         let _ = gamma(190.0, 190.0, t, 0.05, 0.30);
-        let _ = theta(190.0, 190.0, t, 0.05, 0.30, true);
         let _ = vega(190.0, 190.0, t, 0.05, 0.30);
     }
 }

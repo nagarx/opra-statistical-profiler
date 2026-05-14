@@ -48,21 +48,39 @@ impl Cmbp1Loader {
             Cmbp1RecordIterator {
                 decoder,
                 count: 0,
+                decode_errors: 0,
             },
         ))
     }
 }
 
 /// Streaming iterator over CMBP-1 records.
+///
+/// Exposes two cumulative counters consumable post-iteration:
+/// - [`count`](Self::count): records successfully decoded and yielded.
+/// - [`decode_errors`](Self::decode_errors): records whose decoding failed mid-stream
+///   (warn-logged + skipped). Closes F-003 per hft-rules §8 (record diagnostics,
+///   never silently drop). Read AFTER iteration completes; the field is owned by the
+///   iterator, so callers must keep the iterator alive (use `by_ref()` with `for`).
 pub struct Cmbp1RecordIterator<'a> {
     decoder: DynDecoder<'a, BufReader<File>>,
     count: u64,
+    decode_errors: u64,
 }
 
 impl<'a> Cmbp1RecordIterator<'a> {
     /// Number of records yielded so far.
     pub fn count(&self) -> u64 {
         self.count
+    }
+
+    /// Number of records whose decoding failed and were skipped so far.
+    ///
+    /// Increments alongside the `log::warn!` emission in the error arm of
+    /// [`Iterator::next`]. Closes F-003 (silent decode-error swallow) per
+    /// hft-rules §8.
+    pub fn decode_errors(&self) -> u64 {
+        self.decode_errors
     }
 }
 
@@ -78,7 +96,13 @@ impl<'a> Iterator for Cmbp1RecordIterator<'a> {
                 }
                 Ok(None) => return None,
                 Err(e) => {
-                    log::warn!("Failed to decode CMBP-1 record #{}: {}", self.count, e);
+                    self.decode_errors += 1;
+                    log::warn!(
+                        "Failed to decode CMBP-1 record #{} (decode_errors={}): {}",
+                        self.count,
+                        self.decode_errors,
+                        e
+                    );
                     continue;
                 }
             }

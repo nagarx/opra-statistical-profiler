@@ -12,7 +12,7 @@ High-performance statistical profiler for OPRA options microstructure analysis. 
 |----------|-------|
 | Language | Rust (edition 2021, MSRV 1.82) |
 | Trackers | 8 |
-| Tests | 79 |
+| Tests | 84 passed + 1 ignored (FIND-UFO contract-lock, blocked on Axis L) |
 | Source LOC | ~4,177 (21 files including binary) |
 | Throughput | ~4.1M events/sec |
 | Architecture | Single-pass composable tracker dispatch |
@@ -251,10 +251,10 @@ Enriched options event type and day-level context.
 
 | Method | Formula / Logic | Notes |
 |--------|----------------|-------|
-| `option_mid()` | `(bid + ask) / 2` | Returns NAN if either side NAN/infinite or `ask <= bid` (strict inequality -- see D6) |
-| `spread()` | `ask - bid` | Returns NAN if either side NAN/infinite or `ask < bid` (allows `ask == bid` -- see D6) |
-| `spread_pct()` | `spread / mid * 100` | Returns NAN if mid <= 0 or non-finite |
-| `has_valid_bbo()` | `bid.is_finite() && ask.is_finite() && bid > 0 && ask > bid` | Strict validity gate |
+| `option_mid()` | `(bid + ask) / 2` | Returns NAN if either side NAN/infinite or `ask <= bid` (strict — see D6) |
+| `spread()` | `ask - bid` | Returns NAN if either side NAN/infinite or `ask <= bid` (strict post-F-NEW-R5-1 alignment 2026-05-08 — see D6; was `<` pre-fix) |
+| `spread_pct()` | `spread / mid * 100` | Returns NAN if mid <= 0 or non-finite (transitively NaN at locked/crossed via `option_mid()` early-return) |
+| `has_valid_bbo()` | `bid.is_finite() && ask.is_finite() && bid > 0 && ask > bid` | Strict validity gate; also requires `bid > 0` (stricter than the other three) |
 | `is_zero_dte()` | `dte == 0` | |
 | `is_trade()` | `action == Trade` | |
 | `is_call()` | `contract.contract_type == Call` | |
@@ -445,9 +445,14 @@ Put:   P = K * e^(-rT) * N(-d2) - S * N(-d1)
 | Delta (call) | `N(d1)` | |
 | Delta (put) | `N(d1) - 1` | |
 | Gamma | `N'(d1) / (S * sigma * sqrt(T))` | Same for calls and puts |
-| Theta (call) | `[-S * N'(d1) * sigma / (2*sqrt(T)) - r * K * e^(-rT) * N(d2)] / 365` | Per calendar day |
-| Theta (put) | `[-S * N'(d1) * sigma / (2*sqrt(T)) + r * K * e^(-rT) * N(-d2)] / 365` | Per calendar day |
 | Vega | `S * sqrt(T) * N'(d1)` | Same for calls and puts |
+
+> **Theta** was removed in the 2026-05-08 F-017 cleanup. The prior implementation divided
+> `annual_theta / 365.0` (calendar-day units) while `minutes_to_years()` uses 252×390
+> trading-time units — composing them in production would have produced systematically
+> mis-scaled per-day theta. The function had zero production callers, so the unit mismatch
+> was latent. Re-introducing theta MUST align the unit system with `minutes_to_years()`
+> after the project makes an explicit time-system policy decision (see `bsm.rs` comment).
 
 **Edge case handling:** When `t < MIN_T` or `sigma < MIN_IV` or `s <= 0` or `k <= 0`, pricing functions return intrinsic value (`max(S-K, 0)` for calls, `max(K-S, 0)` for puts), Greeks return 0 (or 1/-1 for deep ITM/OTM delta).
 
@@ -586,7 +591,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 
 ### 5.3 PremiumDecayTracker (src/trackers/premium_decay.rs, 216 lines, 3 tests)
 
-**Purpose:** Theta decay curve for 0DTE ATM options. Tracks how premium decays throughout the trading day. Key deliverable: actual theta decay vs BSM theoretical, providing empirical data for the 0DTE strategy's time decay budget.
+**Purpose:** Premium decay curve for 0DTE ATM options. Tracks how observed option premium decays throughout the trading day. Key deliverable: empirical premium-decay data for the 0DTE strategy's time decay budget. (Comparison against BSM-theoretical theta is reserved for a future feature — see D5 — and would require re-introducing `bsm::theta` with aligned unit conventions per the 2026-05-08 F-017 cleanup.)
 
 **Key metrics:**
 - Daily call/put decay percentage: `(first_mid - last_mid) / first_mid * 100`
@@ -604,7 +609,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 - `IntradayCurveAccumulator` (4 instances: actual call/put curves, premium-to-spread call/put)
 - `WelfordAccumulator` (2 instances: daily_call_decay_pct, daily_put_decay_pct)
 
-**Stored fields:** `_risk_free_rate: f64` -- stored for future BSM theoretical theta comparison (see D5).
+**Stored fields:** `_risk_free_rate: f64` -- stored for a future BSM-theoretical comparison feature (see D5). Currently unused because `bsm::theta` was removed in the 2026-05-08 F-017 cleanup pending a time-system unit-policy decision.
 
 **Constructor:** `PremiumDecayTracker::new(risk_free_rate: f64)`
 
@@ -927,11 +932,20 @@ The `GreeksTracker.atm_quote_count` counter (used for IV sampling: compute every
 
 ### D5: _risk_free_rate stored for future use
 
-`PremiumDecayTracker._risk_free_rate` is stored but not currently used. It is reserved for a future feature comparing actual observed theta decay against BSM-theoretical theta decay using the risk-free rate. The leading underscore signals intentional unused storage.
+`PremiumDecayTracker._risk_free_rate` is stored but not currently used. It is reserved for a future feature comparing observed premium decay against BSM-theoretical theta decay. Implementing that feature requires re-introducing `bsm::theta` (removed 2026-05-08 F-017 cleanup) with unit conventions aligned to `minutes_to_years()` (trading-time, not calendar-time). The leading underscore signals intentional unused storage.
 
-### D6: option_mid() vs spread() strictness
+### D6: BBO accessor strictness — aligned STRICT (2026-05-08, F-NEW-R5-1)
 
-`option_mid()` requires strict `ask > bid` (returns NAN for locked markets where ask == bid). `spread()` allows `ask >= bid` (returns 0.0 for locked markets). This asymmetry is intentional: a locked market has zero spread (meaningful) but no defined midpoint (the BBO is a single price, not a range to bisect).
+All four BBO-derived accessors apply STRICT `ask > bid` gating uniformly:
+
+| Accessor (`src/event.rs`) | Gate | Behavior at `ask == bid` |
+|---|---|---|
+| `option_mid()` (:91) | STRICT `ask > bid` | NaN |
+| `spread()` (:105)    | STRICT `ask > bid` (was `>=` pre-fix) | NaN |
+| `spread_pct()` (:114) | STRICT via `option_mid()` early-return | NaN |
+| `has_valid_bbo()` (:139) | STRICT `ask > bid` AND `bid > 0` | false |
+
+**Rationale:** the prior mixed-strictness scheme (option_mid strict, spread non-strict) was a contract-plane asymmetry surfaced by Round 5 of the OPRA adversarial-validation cycle. A locked market (`ask == bid`) is not a valid BBO observation per hft-rules §8 — silently emitting `spread=0` while `option_mid` returned NaN produced an inconsistent internal state in `spread_pct` (which depends on both). Aligning to STRICT closes the asymmetry. In practice all 8 tracker consumers gate on `has_valid_bbo()` (already STRICT pre-fix), so observable output is empirically unchanged — the fix is contract-plane correctness, not output drift. Locked behavior across all four accessors is locked by a parametric invariant test in `event.rs::tests::test_invariant_finiteness_agrees_across_option_mid_spread_spread_pct`.
 
 ### D7: iv_sample_interval not in TOML
 
@@ -958,7 +972,9 @@ All tests are inline (`#[cfg(test)]` modules within each source file). No integr
 | File | Tests | Description |
 |------|-------|-------------|
 | `contract.rs` | 12 | OCC parsing: standard call/put, fractional/small/large strikes, LEAPS expiry, DTE, 0DTE, malformed (too short, bad type, bad date, empty root) |
-| `bsm.rs` | 19 | norm_cdf known values, BSM call/put prices, put-call parity (5 strikes), delta (ATM/deep ITM/deep OTM), gamma (positive, peak at ATM), theta (negative for long), vega (positive), IV recovery (call, put), IV edge cases (zero price, below intrinsic, 0DTE ATM), minutes_to_years, near-expiry no-panic |
+| `bsm.rs` | 18 | norm_cdf known values, BSM call/put prices, put-call parity (5 strikes), delta (ATM/deep ITM/deep OTM), gamma (positive, peak at ATM), vega (positive), IV recovery (call, put), IV edge cases (zero price, below intrinsic, 0DTE ATM), minutes_to_years, near-expiry no-panic. (Theta test removed with F-017 cleanup 2026-05-08.) |
+| `event.rs` | 6 | F-NEW-R5-1 BBO accessor strictness invariant: boundary triplet `{ask > bid, ask == bid, ask < bid}` + NaN bid / NaN ask, parametric cross-accessor finiteness lock. Plus 1 ignored `test_intraday_underlying_reflected_in_event_underlying_price` (F-013 FIND-UFO contract-lock, blocked on Axis L) |
+| `loader.rs` | 0 | F-003 decode_errors counter is regression-tested at the integration level — DEFERRED to Phase 2 (requires corrupt-DBN file-system fixture under `tests/fixtures/`) |
 | `moneyness.rs` | 11 | Call ATM/ATM-edge/ITM/deep-ITM/OTM/deep-OTM, put ATM/ITM/OTM, invalid underlying (0, negative, NaN), ratio computation |
 | `report_utils.rs` | 4 | dte_bucket_index (including negative DTE), moneyness_index, DTE labels match indices, moneyness labels match indices |
 | `quality.rs` | 4 | Quote/trade counting, DTE bucketing, day rollover, finalize structure |
@@ -969,7 +985,7 @@ All tests are inline (`#[cfg(test)]` modules within each source file). No integr
 | `zero_dte.rs` | 4 | Non-0DTE filtered, non-ATM filtered, 0DTE ATM counting, call/put separation |
 | `put_call.rs` | 4 | PCR computation (50/100=0.5), no-calls-no-PCR, day rollover, finalize structure |
 | `effective_spread.rs` | 6 | size_bucket_index, effective spread formula (2*|1.08-1.05|=0.06), trade-through classification (inside/at/outside BBO), quotes ignored, zero-size ignored, finalize structure |
-| **Total** | **79** | |
+| **Total** | **84 + 1 ignored** | |
 
 ---
 

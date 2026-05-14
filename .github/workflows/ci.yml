@@ -1,0 +1,115 @@
+name: ci
+
+# Core CI for opra-statistical-profiler. Runs on every push to main and every PR.
+#
+# Gates (per hft-rules §6 + §11):
+#   - fmt    : cargo fmt --all --check
+#   - clippy : -D warnings (single feature config — opra has no [features] block)
+#   - test   : cargo test --verbose
+#   - doc    : cargo doc --no-deps with RUSTDOCFLAGS=-D warnings
+#              (catches the doc-warning-as-error class — feature-extractor-MBO-LOB
+#              Phase J.9 shipped a doc regression that local `cargo test` missed
+#              because rustdoc warnings only fail under -D warnings)
+#   - msrv   : cargo check --lib on rustc 1.82 (matches Cargo.toml rust-version)
+#
+# Audit + semver gates intentionally deferred — first-cycle minimum-viable CI.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+      - name: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test
+      - name: cargo test --verbose
+        run: cargo test --verbose
+
+  doc:
+    name: doc
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Treat broken doc links and warnings as errors — per hft-rules §11, docs
+    # must reflect current behavior exactly. Silent doc rot is a bug. Closes
+    # the lesson from feature-extractor-MBO-LOB Phase J.9 doc-warning incident.
+    env:
+      RUSTDOCFLAGS: '-D warnings'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: doc
+      - name: cargo doc --no-deps
+        run: cargo doc --no-deps
+
+  msrv:
+    name: msrv (1.82)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Validates the rust-version pin in Cargo.toml. Scope is `--lib` (not
+    # `--all-targets`) per hft-statistics precedent: dev-dependencies (criterion)
+    # require newer rustc than the library API. Library MSRV is what consumers
+    # care about; dev-tooling runs on stable.
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.82
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-1.82
+      - name: cargo check --lib (rustc 1.82)
+        run: cargo check --lib
