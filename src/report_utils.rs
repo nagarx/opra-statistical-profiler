@@ -98,6 +98,9 @@ mod tests {
     #[test]
     fn test_moneyness_labels_match_indices() {
         assert_eq!(MONEYNESS_LABELS[moneyness_index(Moneyness::Atm)], "atm");
-        assert_eq!(MONEYNESS_LABELS[moneyness_index(Moneyness::DeepOtm)], "deep_otm");
+        assert_eq!(
+            MONEYNESS_LABELS[moneyness_index(Moneyness::DeepOtm)],
+            "deep_otm"
+        );
     }
 }

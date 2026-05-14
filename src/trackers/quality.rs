@@ -153,8 +153,8 @@ impl OptionsTracker for QualityTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::helpers::*;
     use crate::options_math::moneyness::Moneyness;
+    use crate::test_helpers::helpers::*;
 
     #[test]
     fn test_counts_quotes_and_trades() {

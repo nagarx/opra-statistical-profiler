@@ -41,7 +41,6 @@ impl SpreadTracker {
             n_days: 0,
         }
     }
-
 }
 
 impl OptionsTracker for SpreadTracker {
@@ -170,8 +169,8 @@ impl OptionsTracker for SpreadTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::helpers::*;
     use crate::options_math::moneyness::Moneyness;
+    use crate::test_helpers::helpers::*;
 
     #[test]
     fn test_spread_computation() {
@@ -183,7 +182,11 @@ mod tests {
         t.end_of_day(0);
         let r = t.finalize();
         let mean = r["all_spread_usd"]["mean"].as_f64().unwrap();
-        assert!((mean - 0.05).abs() < 1e-10, "Spread: expected 0.05, got {}", mean);
+        assert!(
+            (mean - 0.05).abs() < 1e-10,
+            "Spread: expected 0.05, got {}",
+            mean
+        );
     }
 
     #[test]
@@ -209,7 +212,10 @@ mod tests {
         t.process_event(&otm, 3);
         t.end_of_day(0);
         let r = t.finalize();
-        assert_eq!(r["dte0_atm_spread_usd"]["count"], 1, "Only ATM 0DTE should be counted");
+        assert_eq!(
+            r["dte0_atm_spread_usd"]["count"], 1,
+            "Only ATM 0DTE should be counted"
+        );
     }
 
     #[test]

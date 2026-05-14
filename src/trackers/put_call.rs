@@ -7,7 +7,6 @@ use hft_statistics::statistics::{IntradayCurveAccumulator, WelfordAccumulator};
 use crate::event::{DayContext, OptionsEvent};
 use crate::OptionsTracker;
 
-
 pub struct PutCallRatioTracker {
     utc_offset: i32,
     // Per-day put-call ratio tracking
@@ -121,20 +120,19 @@ impl OptionsTracker for PutCallRatioTracker {
     }
 
     fn finalize(&self) -> serde_json::Value {
-        let make_curve =
-            |acc: &IntradayCurveAccumulator, key: &str| -> Vec<serde_json::Value> {
-                acc.finalize()
-                    .into_iter()
-                    .filter(|b| b.count > 0)
-                    .map(|b| {
-                        json!({
-                            "minutes_since_open": b.minutes_since_open,
-                            key: b.mean,
-                            "count": b.count,
-                        })
+        let make_curve = |acc: &IntradayCurveAccumulator, key: &str| -> Vec<serde_json::Value> {
+            acc.finalize()
+                .into_iter()
+                .filter(|b| b.count > 0)
+                .map(|b| {
+                    json!({
+                        "minutes_since_open": b.minutes_since_open,
+                        key: b.mean,
+                        "count": b.count,
                     })
-                    .collect()
-            };
+                })
+                .collect()
+        };
 
         json!({
             "tracker": "PutCallRatioTracker",
@@ -168,8 +166,8 @@ impl OptionsTracker for PutCallRatioTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::helpers::*;
     use crate::options_math::moneyness::Moneyness;
+    use crate::test_helpers::helpers::*;
 
     #[test]
     fn test_pcr_computation() {
@@ -196,7 +194,10 @@ mod tests {
         t.process_event(&tp, 3);
         t.end_of_day(0);
         let r = t.finalize();
-        assert_eq!(r["pcr_volume_daily"]["count"], 0, "No PCR when no call volume");
+        assert_eq!(
+            r["pcr_volume_daily"]["count"], 0,
+            "No PCR when no call volume"
+        );
     }
 
     #[test]

@@ -132,21 +132,20 @@ impl OptionsTracker for PremiumDecayTracker {
     }
 
     fn finalize(&self) -> serde_json::Value {
-        let make_curve =
-            |acc: &IntradayCurveAccumulator, key: &str| -> Vec<serde_json::Value> {
-                acc.finalize()
-                    .into_iter()
-                    .filter(|b| b.count > 0)
-                    .map(|b| {
-                        json!({
-                            "minutes_since_open": b.minutes_since_open,
-                            key: b.mean,
-                            "std": b.std,
-                            "count": b.count,
-                        })
+        let make_curve = |acc: &IntradayCurveAccumulator, key: &str| -> Vec<serde_json::Value> {
+            acc.finalize()
+                .into_iter()
+                .filter(|b| b.count > 0)
+                .map(|b| {
+                    json!({
+                        "minutes_since_open": b.minutes_since_open,
+                        key: b.mean,
+                        "std": b.std,
+                        "count": b.count,
                     })
-                    .collect()
-            };
+                })
+                .collect()
+        };
 
         json!({
             "tracker": "PremiumDecayTracker",
@@ -177,8 +176,8 @@ impl OptionsTracker for PremiumDecayTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::helpers::*;
     use crate::options_math::moneyness::Moneyness;
+    use crate::test_helpers::helpers::*;
 
     #[test]
     fn test_tracks_first_last_premium() {
@@ -193,7 +192,11 @@ mod tests {
         let r = t.finalize();
         let decay = r["daily_call_decay_pct"]["mean"].as_f64().unwrap();
         // First mid = 2.05, last mid = 0.55. Decay = (2.05 - 0.55) / 2.05 * 100 = 73.2%
-        assert!(decay > 70.0 && decay < 75.0, "Decay should be ~73%, got {}", decay);
+        assert!(
+            decay > 70.0 && decay < 75.0,
+            "Decay should be ~73%, got {}",
+            decay
+        );
     }
 
     #[test]

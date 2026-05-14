@@ -130,11 +130,7 @@ impl ContractMap {
             }
         }
 
-        log::info!(
-            "ContractMap: {} contracts parsed for {}",
-            map.len(),
-            date
-        );
+        log::info!("ContractMap: {} contracts parsed for {}", map.len(), date);
         Self { map }
     }
 
@@ -170,7 +166,6 @@ impl ContractMap {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,9 +174,16 @@ mod tests {
     fn test_parse_standard_call() {
         let info = parse_occ_symbol("NVDA  251114C00185000", 12345).unwrap();
         assert_eq!(info.underlying, "NVDA");
-        assert_eq!(info.expiration, NaiveDate::from_ymd_opt(2025, 11, 14).unwrap());
+        assert_eq!(
+            info.expiration,
+            NaiveDate::from_ymd_opt(2025, 11, 14).unwrap()
+        );
         assert_eq!(info.contract_type, ContractType::Call);
-        assert!((info.strike - 185.0).abs() < 1e-10, "Strike: {}", info.strike);
+        assert!(
+            (info.strike - 185.0).abs() < 1e-10,
+            "Strike: {}",
+            info.strike
+        );
         assert_eq!(info.instrument_id, 12345);
     }
 
@@ -196,7 +198,11 @@ mod tests {
     fn test_parse_fractional_strike() {
         // $152.50 = 00152500
         let info = parse_occ_symbol("NVDA  251121C00152500", 1).unwrap();
-        assert!((info.strike - 152.5).abs() < 1e-10, "Strike: {}", info.strike);
+        assert!(
+            (info.strike - 152.5).abs() < 1e-10,
+            "Strike: {}",
+            info.strike
+        );
     }
 
     #[test]
@@ -217,7 +223,10 @@ mod tests {
     fn test_parse_leaps_expiry() {
         // 2028-01-21
         let info = parse_occ_symbol("NVDA  280121C00130000", 1).unwrap();
-        assert_eq!(info.expiration, NaiveDate::from_ymd_opt(2028, 1, 21).unwrap());
+        assert_eq!(
+            info.expiration,
+            NaiveDate::from_ymd_opt(2028, 1, 21).unwrap()
+        );
     }
 
     #[test]

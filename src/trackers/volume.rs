@@ -10,7 +10,6 @@ use crate::event::{DayContext, OptionsEvent};
 use crate::report_utils::{DTE_LABELS, MONEYNESS_LABELS};
 use crate::OptionsTracker;
 
-
 pub struct VolumeTracker {
     utc_offset: i32,
     total_trades: u64,
@@ -63,7 +62,6 @@ impl VolumeTracker {
             n_days: 0,
         }
     }
-
 }
 
 impl OptionsTracker for VolumeTracker {
@@ -141,20 +139,19 @@ impl OptionsTracker for VolumeTracker {
             money_map.insert(label.to_string(), json!(self.moneyness_volume[i]));
         }
 
-        let make_curve =
-            |acc: &IntradayCurveAccumulator, key: &str| -> Vec<serde_json::Value> {
-                acc.finalize()
-                    .into_iter()
-                    .filter(|b| b.count > 0)
-                    .map(|b| {
-                        json!({
-                            "minutes_since_open": b.minutes_since_open,
-                            key: b.mean,
-                            "count": b.count,
-                        })
+        let make_curve = |acc: &IntradayCurveAccumulator, key: &str| -> Vec<serde_json::Value> {
+            acc.finalize()
+                .into_iter()
+                .filter(|b| b.count > 0)
+                .map(|b| {
+                    json!({
+                        "minutes_since_open": b.minutes_since_open,
+                        key: b.mean,
+                        "count": b.count,
                     })
-                    .collect()
-            };
+                })
+                .collect()
+        };
 
         json!({
             "tracker": "VolumeTracker",
@@ -193,8 +190,8 @@ impl OptionsTracker for VolumeTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::helpers::*;
     use crate::options_math::moneyness::Moneyness;
+    use crate::test_helpers::helpers::*;
 
     #[test]
     fn test_counts_trades_only() {
@@ -221,8 +218,10 @@ mod tests {
         t.end_of_day(0);
         let r = t.finalize();
         let pcr = r["put_call_ratio_volume"].as_f64();
-        assert!(pcr.is_none() || pcr.unwrap().is_nan() || pcr.unwrap().is_infinite(),
-            "PCR should be NaN/null when no calls");
+        assert!(
+            pcr.is_none() || pcr.unwrap().is_nan() || pcr.unwrap().is_infinite(),
+            "PCR should be NaN/null when no calls"
+        );
     }
 
     #[test]

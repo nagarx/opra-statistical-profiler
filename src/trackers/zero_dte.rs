@@ -16,7 +16,6 @@ use hft_statistics::statistics::{
 use crate::event::{DayContext, OptionsEvent};
 use crate::OptionsTracker;
 
-
 pub struct ZeroDteTracker {
     utc_offset: i32,
     // Per-minute intraday curves (390 bins, RTH 09:30-16:00)
@@ -151,20 +150,21 @@ impl OptionsTracker for ZeroDteTracker {
     }
 
     fn finalize(&self) -> serde_json::Value {
-        let make_curve = |acc: &IntradayCurveAccumulator, value_key: &str| -> Vec<serde_json::Value> {
-            acc.finalize()
-                .into_iter()
-                .filter(|b| b.count > 0)
-                .map(|b| {
-                    json!({
-                        "minutes_since_open": b.minutes_since_open,
-                        value_key: b.mean,
-                        "std": b.std,
-                        "count": b.count,
+        let make_curve =
+            |acc: &IntradayCurveAccumulator, value_key: &str| -> Vec<serde_json::Value> {
+                acc.finalize()
+                    .into_iter()
+                    .filter(|b| b.count > 0)
+                    .map(|b| {
+                        json!({
+                            "minutes_since_open": b.minutes_since_open,
+                            value_key: b.mean,
+                            "std": b.std,
+                            "count": b.count,
+                        })
                     })
-                })
-                .collect()
-        };
+                    .collect()
+            };
 
         json!({
             "tracker": "ZeroDteTracker",
@@ -204,8 +204,8 @@ impl OptionsTracker for ZeroDteTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::helpers::*;
     use crate::options_math::moneyness::Moneyness;
+    use crate::test_helpers::helpers::*;
 
     #[test]
     fn test_filters_non_0dte() {

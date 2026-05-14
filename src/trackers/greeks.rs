@@ -14,7 +14,6 @@ use crate::options_math::bsm;
 use crate::report_utils::DTE_LABELS;
 use crate::OptionsTracker;
 
-
 pub struct GreeksTracker {
     utc_offset: i32,
     // 0DTE ATM IV
@@ -69,7 +68,6 @@ impl GreeksTracker {
             n_days: 0,
         }
     }
-
 }
 
 impl OptionsTracker for GreeksTracker {
@@ -215,8 +213,8 @@ impl OptionsTracker for GreeksTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::helpers::*;
     use crate::options_math::moneyness::Moneyness;
+    use crate::test_helpers::helpers::*;
 
     #[test]
     fn test_iv_computation_fires_for_atm() {
@@ -228,8 +226,10 @@ mod tests {
         t.end_of_day(0);
         let r = t.finalize();
         let computed = r["iv_computed"].as_u64().unwrap();
-        assert!(computed >= 1 || r["iv_failed"].as_u64().unwrap() >= 1,
-            "Should attempt at least 1 IV computation");
+        assert!(
+            computed >= 1 || r["iv_failed"].as_u64().unwrap() >= 1,
+            "Should attempt at least 1 IV computation"
+        );
     }
 
     #[test]
@@ -247,7 +247,11 @@ mod tests {
         let failed = r["iv_failed"].as_u64().unwrap();
         let total_attempts = computed + failed;
         assert_eq!(r["atm_quote_count"].as_u64().unwrap(), 500);
-        assert_eq!(total_attempts, 50, "500 events / interval 10 = 50 attempts, got {}", total_attempts);
+        assert_eq!(
+            total_attempts, 50,
+            "500 events / interval 10 = 50 attempts, got {}",
+            total_attempts
+        );
     }
 
     #[test]
@@ -259,7 +263,10 @@ mod tests {
         t.process_event(&e, 3);
         t.end_of_day(0);
         let r = t.finalize();
-        assert_eq!(r["iv_computed"].as_u64().unwrap() + r["iv_failed"].as_u64().unwrap(), 0);
+        assert_eq!(
+            r["iv_computed"].as_u64().unwrap() + r["iv_failed"].as_u64().unwrap(),
+            0
+        );
     }
 
     #[test]

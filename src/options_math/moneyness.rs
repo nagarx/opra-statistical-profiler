@@ -177,27 +177,21 @@ mod tests {
 
     #[test]
     fn test_put_atm() {
-        let m = buckets()
-            .classify(190.0, 190.0, ContractType::Put)
-            .unwrap();
+        let m = buckets().classify(190.0, 190.0, ContractType::Put).unwrap();
         assert_eq!(m, Moneyness::Atm);
     }
 
     #[test]
     fn test_put_itm() {
         // Put ITM: strike > underlying. Strike 200, stock 190 → ratio 1.053
-        let m = buckets()
-            .classify(200.0, 190.0, ContractType::Put)
-            .unwrap();
+        let m = buckets().classify(200.0, 190.0, ContractType::Put).unwrap();
         assert_eq!(m, Moneyness::Itm);
     }
 
     #[test]
     fn test_put_otm() {
         // Put OTM: strike < underlying. Strike 180, stock 190 → ratio 0.947
-        let m = buckets()
-            .classify(180.0, 190.0, ContractType::Put)
-            .unwrap();
+        let m = buckets().classify(180.0, 190.0, ContractType::Put).unwrap();
         assert_eq!(m, Moneyness::Otm);
     }
 

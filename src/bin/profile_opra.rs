@@ -15,15 +15,16 @@ fn main() {
     let config = match ProfilerConfig::from_file(&config_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to load config from {}: {}", config_path.display(), e);
+            eprintln!(
+                "Failed to load config from {}: {}",
+                config_path.display(),
+                e
+            );
             std::process::exit(1);
         }
     };
 
-    log::info!(
-        "OPRA Statistical Profiler v{}",
-        env!("CARGO_PKG_VERSION")
-    );
+    log::info!("OPRA Statistical Profiler v{}", env!("CARGO_PKG_VERSION"));
     log::info!("Symbol: {}", config.input.symbol);
 
     let underlying_prices = match &config.input.underlying_prices_file {
@@ -68,7 +69,9 @@ fn main() {
         trackers.push(Box::new(ZeroDteTracker::new(config.reservoir_capacity)));
     }
     if config.trackers.premium_decay {
-        trackers.push(Box::new(PremiumDecayTracker::new(config.input.risk_free_rate)));
+        trackers.push(Box::new(PremiumDecayTracker::new(
+            config.input.risk_free_rate,
+        )));
     }
     if config.trackers.volume {
         trackers.push(Box::new(VolumeTracker::new(config.reservoir_capacity)));

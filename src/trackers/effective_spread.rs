@@ -18,7 +18,9 @@ use serde_json::json;
 use hft_statistics::statistics::{IntradayCurveAccumulator, WelfordAccumulator};
 
 use crate::event::{DayContext, OptionsEvent};
-use crate::report_utils::{finalize_curve, DTE_LABELS, MONEYNESS_LABELS, dte_bucket_index, moneyness_index};
+use crate::report_utils::{
+    dte_bucket_index, finalize_curve, moneyness_index, DTE_LABELS, MONEYNESS_LABELS,
+};
 use crate::OptionsTracker;
 
 const SIZE_BUCKET_BOUNDS: [u32; 5] = [1, 5, 10, 50, 100];
@@ -191,7 +193,10 @@ impl OptionsTracker for OptionsEffectiveSpreadTracker {
                 }
             }
             if !moneyness_map.is_empty() {
-                dte_moneyness.insert(dte_label.to_string(), serde_json::Value::Object(moneyness_map));
+                dte_moneyness.insert(
+                    dte_label.to_string(),
+                    serde_json::Value::Object(moneyness_map),
+                );
             }
         }
 
@@ -211,8 +216,9 @@ impl OptionsTracker for OptionsEffectiveSpreadTracker {
             .collect();
 
         let total_all = self.trades_inside_bbo + self.trades_at_bbo + self.trades_outside_bbo;
-        let total_0dte_atm =
-            self.trades_inside_bbo_0dte_atm + self.trades_at_bbo_0dte_atm + self.trades_outside_bbo_0dte_atm;
+        let total_0dte_atm = self.trades_inside_bbo_0dte_atm
+            + self.trades_at_bbo_0dte_atm
+            + self.trades_outside_bbo_0dte_atm;
 
         json!({
             "tracker": "OptionsEffectiveSpreadTracker",
@@ -264,16 +270,16 @@ impl OptionsTracker for OptionsEffectiveSpreadTracker {
 mod tests {
     use super::*;
 
-    use crate::test_helpers::helpers::*;
     use crate::options_math::moneyness::Moneyness;
+    use crate::test_helpers::helpers::*;
 
     #[test]
     fn test_size_bucket_index() {
-        assert_eq!(size_bucket_index(1), 0);   // "1"
-        assert_eq!(size_bucket_index(3), 1);   // "2-5"
-        assert_eq!(size_bucket_index(5), 1);   // "2-5"
-        assert_eq!(size_bucket_index(10), 2);  // "6-10"
-        assert_eq!(size_bucket_index(50), 3);  // "11-50"
+        assert_eq!(size_bucket_index(1), 0); // "1"
+        assert_eq!(size_bucket_index(3), 1); // "2-5"
+        assert_eq!(size_bucket_index(5), 1); // "2-5"
+        assert_eq!(size_bucket_index(10), 2); // "6-10"
+        assert_eq!(size_bucket_index(50), 3); // "11-50"
         assert_eq!(size_bucket_index(100), 4); // "51-100"
         assert_eq!(size_bucket_index(500), 5); // "100+"
     }
@@ -295,11 +301,13 @@ mod tests {
         let quot_mean = atm["quoted_spread"]["mean"].as_f64().unwrap();
         assert!(
             (eff_mean - 0.06).abs() < 1e-10,
-            "Effective spread: 2*|1.08-1.05| = 0.06, got {}", eff_mean
+            "Effective spread: 2*|1.08-1.05| = 0.06, got {}",
+            eff_mean
         );
         assert!(
             (quot_mean - 0.10).abs() < 1e-10,
-            "Quoted spread: 1.10-1.00 = 0.10, got {}", quot_mean
+            "Quoted spread: 1.10-1.00 = 0.10, got {}",
+            quot_mean
         );
     }
 
@@ -326,7 +334,8 @@ mod tests {
         let ttr = loc["trade_through_rate"].as_f64().unwrap();
         assert!(
             (ttr - 1.0 / 3.0).abs() < 1e-10,
-            "Trade-through rate: 1/3, got {}", ttr
+            "Trade-through rate: 1/3, got {}",
+            ttr
         );
     }
 
@@ -339,7 +348,10 @@ mod tests {
         t.process_event(&q, 0);
         t.end_of_day(0);
         let r = t.finalize();
-        assert_eq!(r["total_trades"], 0, "Quote events should not be counted as trades");
+        assert_eq!(
+            r["total_trades"], 0,
+            "Quote events should not be counted as trades"
+        );
     }
 
     #[test]
