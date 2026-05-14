@@ -1,0 +1,7 @@
+# Pinned per hft-rules §0 (long-run engineering) + §7 (determinism).
+# Coordinated across 6 standalone Rust crates in HFT-pipeline-v2 monorepo for
+# cross-crate Cargo.lock format alignment. See #PY-220 closure (2026-05-14).
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
