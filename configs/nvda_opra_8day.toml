@@ -8,6 +8,7 @@ reservoir_capacity = 10000
 data_dir = "../data/OPRA/NVDA/cmbp1_2025-11-13_to_2025-11-25"
 filename_pattern = "opra-pillar-{date}.cmbp-1.dbn.zst"
 symbol = "NVDA"
+underlying_prices_file = "../data/EQUS_SUMMARY/NVDA/ohlcv1d_2025-02-03_to_2026-03-05/equs-summary-20250203-20260305.ohlcv-1d.dbn.zst"
 risk_free_rate = 0.05
 
 [trackers]

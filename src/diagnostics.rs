@@ -158,4 +158,28 @@ mod tests {
         assert_eq!(d.total_decoded, 0);
         assert_eq!(d.dispatched, 0);
     }
+
+    #[test]
+    fn test_action_sub_counters_partition_dispatched() {
+        let d = ProfileDiagnostics {
+            total_decoded: 1000,
+            unknown_instrument: 50,
+            dispatched: 950,
+            decode_errors: 0,
+            observability: DispatchObservability {
+                action_trade: 200,
+                action_quote: 740,
+                action_other: 10,
+                ..Default::default()
+            },
+        };
+        assert!(d.conservation_check());
+        assert_eq!(
+            d.observability.action_trade
+                + d.observability.action_quote
+                + d.observability.action_other,
+            d.dispatched,
+            "Action sub-counters must partition dispatched"
+        );
+    }
 }

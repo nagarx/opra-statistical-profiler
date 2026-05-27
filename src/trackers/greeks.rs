@@ -34,6 +34,9 @@ pub struct GreeksTracker {
     dte_bucket_iv: [WelfordAccumulator; 4],
 
     risk_free_rate: f64,
+    /// Tracker-level IV cap (default 5.0 = 500% annualized). The BSM solver
+    /// uses a wider `MAX_IV=10.0` to allow convergence; this tighter cap
+    /// rejects statistical outliers from aggregate distributions.
     max_iv: f64,
     /// Internal sampling counter (initialized to `iv_sample_interval - 1` so
     /// the first ATM event of each day triggers IV computation).

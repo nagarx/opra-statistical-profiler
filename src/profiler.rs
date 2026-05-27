@@ -296,6 +296,11 @@ pub fn run(
         diag.unknown_instrument,
         diag.dispatched
     );
+    debug_assert_eq!(
+        total_events, diag.dispatched,
+        "BUG: total_events({}) diverged from diagnostics.dispatched({})",
+        total_events, diag.dispatched
+    );
 
     Ok(ProfileResult {
         n_days: day_index,
