@@ -125,7 +125,15 @@ pub fn run(
         let contract_map = ContractMap::from_dbn_metadata(&metadata, dbn_date);
 
         let mut day_events: u64 = 0;
-        let underlying_estimate = underlying_open;
+
+        // FIND-UFO partial fix: interpolate underlying price between EQUS daily
+        // open and close using session progress. This captures directional drift
+        // (e.g., $194→$183 on earnings day) instead of freezing at open.
+        // Full fix requires intraday EQUS feed at 1s/1m resolution (Axis L).
+        let rth_open_utc_ns: i64 =
+            (14 - utc_offset as i64) * 3600 * 1_000_000_000 + 30 * 60 * 1_000_000_000; // 09:30 ET in UTC ns-since-midnight
+        let rth_close_utc_ns: i64 = (16 - utc_offset as i64) * 3600 * 1_000_000_000; // 16:00 ET
+        let rth_duration_ns: f64 = (rth_close_utc_ns - rth_open_utc_ns) as f64;
 
         // `records.by_ref()` keeps the iterator alive after the loop so we can read
         // the cumulative `decode_errors` counter below (F-003 fix; see loader.rs).
@@ -178,6 +186,19 @@ pub fn run(
             };
 
             let dte = contract.dte(trading_date);
+
+            // Per-event underlying estimate via time-weighted open→close interpolation.
+            // Pre-market events use open; post-market use close; RTH linearly interpolates.
+            let event_tod_ns = record.hd.ts_event as i64 % (24 * 3600 * 1_000_000_000_i64);
+            let underlying_estimate = if event_tod_ns <= rth_open_utc_ns {
+                underlying_open
+            } else if event_tod_ns >= rth_close_utc_ns {
+                underlying_close
+            } else {
+                let progress = (event_tod_ns - rth_open_utc_ns) as f64 / rth_duration_ns;
+                underlying_open + progress * (underlying_close - underlying_open)
+            };
+
             let moneyness_ratio = if underlying_estimate > 0.0 {
                 contract.strike / underlying_estimate
             } else {
