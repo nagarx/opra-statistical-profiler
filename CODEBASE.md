@@ -12,8 +12,8 @@ High-performance statistical profiler for OPRA options microstructure analysis. 
 |----------|-------|
 | Language | Rust (edition 2021, MSRV 1.82) |
 | Trackers | 8 |
-| Tests | 84 passed + 1 ignored (FIND-UFO contract-lock, blocked on Axis L) |
-| Source LOC | ~4,177 (21 files including binary) |
+| Tests | 91 passed + 1 ignored (FIND-UFO contract-lock, blocked on Axis L) |
+| Source LOC | ~4,550 (22 files including binary + diagnostics.rs) |
 | Throughput | ~4.1M events/sec |
 | Architecture | Single-pass composable tracker dispatch |
 | Input | OPRA CMBP-1 `.dbn.zst` (consolidated BBO + trades) |
@@ -246,6 +246,13 @@ Enriched options event type and day-level context.
 | `moneyness` | `Moneyness` | 5-class classification |
 | `moneyness_ratio` | `f64` | strike / underlying_price |
 | `underlying_price` | `f64` | Current underlying estimate (USD) |
+| `publisher_id` | `u16` | Originating venue (`RecordHeader.publisher_id`). Phase 2A-1. |
+| `bid_pb` | `u16` | Best-bid venue at consolidated NBBO. Phase 2A-1. |
+| `ask_pb` | `u16` | Best-ask venue at consolidated NBBO. Phase 2A-1. |
+| `ts_in_delta` | `i32` | SIP-vs-exchange latency (ns, capped 2s). Phase 2A-1. |
+| `flags` | `u8` | Raw dbn FlagSet: MAYBE_BAD_BOOK=0x04, BAD_TS_RECV=0x08, SNAPSHOT=0x20. Phase 2A-1. |
+| `sequence` | `u32` | Venue message sequence number. Phase 2A-1. |
+| `ts_recv` | `i64` | Capture-server timestamp (UTC ns). Phase 2A-1. |
 
 **Helper methods:**
 
@@ -287,21 +294,22 @@ Opens the `.dbn.zst` file with 1 MB buffered reader, creates a `DynDecoder` with
 
 ---
 
-### src/profiler.rs (377 lines)
+### src/profiler.rs (~460 lines)
 
-Single-pass profiling engine. Orchestrates file discovery, day processing, event enrichment, and tracker dispatch.
+Single-pass profiling engine. Orchestrates file discovery, day processing, event enrichment, tracker dispatch, and diagnostic accounting.
 
 **Constants:**
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
 | `SENTINEL_I64` | `i64::MAX` | dbn sentinel for undefined prices |
+| `OUTPUT_SCHEMA_VERSION` | `"2.0.0"` | SemVer for per-tracker JSON output schema (Phase 2A-5) |
 
 **Types:**
 
 | Type | Fields | Description |
 |------|--------|-------------|
-| `ProfileResult` | `n_days: u32`, `total_events: u64`, `elapsed_secs: f64`, `reports: Vec<(String, Value)>` | Profiling output |
+| `ProfileResult` | `n_days: u32`, `total_events: u64`, `total_decode_errors: u64`, `elapsed_secs: f64`, `reports: Vec<(String, Value)>`, `diagnostics: ProfileDiagnostics` | Profiling output |
 | `DailyUnderlyingPrice` | `date: NaiveDate`, `open: f64`, `close: f64` | Per-day underlying OHLCV |
 
 **Functions:**
@@ -316,24 +324,16 @@ Single-pass profiling engine. Orchestrates file discovery, day processing, event
 
 **Event enrichment (inside run()):**
 
-```rust
-let bid_px = price_or_nan(record.levels[0].bid_px);
-let ask_px = price_or_nan(record.levels[0].ask_px);
-let trade_price = price_or_nan(record.price);
-let action = match record.action as u8 { b'T' => Trade, b'A' => Quote, _ => Other };
-let side = match record.side as u8 { b'B' => Bid, b'A' => Ask, _ => None };
-let dte = contract.dte(trading_date);
-let moneyness_ratio = contract.strike / underlying_estimate;
-let moneyness = moneyness_buckets.classify(...).unwrap_or(Otm);
-```
+The dispatch loop reads ALL 19 non-reserved CbboMsg fields (Phase 2A-1), increments `ProfileDiagnostics` counters at every decision point (Phase 2A-2), and computes `time_regime()` from `hft_statistics` (Phase 2A-4). Every record is accounted for via the conservation law: `total_decoded == unknown_instrument + dispatched`.
 
-Key detail: `underlying_estimate = underlying_open` for the entire day (see D1).
+Key detail: `underlying_estimate = underlying_open` for the entire day (see D1 / FIND-UFO).
 
 **Provenance object (injected into every JSON output):**
 
 ```json
 {
   "profiler_version": "0.1.0",
+  "output_schema_version": "2.0.0",
   "symbol": "NVDA",
   "dataset": "OPRA.PILLAR",
   "schema": "cmbp-1",
@@ -341,6 +341,23 @@ Key detail: `underlying_estimate = underlying_open` for the entire day (see D1).
   "total_events": 32000000,
   "runtime_secs": 7.8,
   "throughput_events_per_sec": 4100000,
+  "diagnostics_schema_version": "1.0.0",
+  "diagnostics": {
+    "total_decoded": 32000100,
+    "unknown_instrument": 100,
+    "dispatched": 32000000,
+    "decode_errors": 0,
+    "observability": {
+      "action_trade": 5000000,
+      "action_quote": 26999500,
+      "action_other": 500,
+      "moneyness_fallback": 0,
+      "bad_book_flagged": 3,
+      "bad_ts_flagged": 17,
+      "snapshot_flagged": 0
+    }
+  },
+  "conservation_check": true,
   "config": { "...full config..." }
 }
 ```
@@ -458,12 +475,8 @@ Put:   P = K * e^(-rT) * N(-d2) - S * N(-d1)
 
 **norm_cdf (Standard Normal CDF):**
 
-Hart (1968) rational approximation via Abramowitz & Stegun 7.1.26.
-- Accuracy: |error| < 7.5e-8
-- Implementation: `N(x) = 0.5 * erfc(-x / sqrt(2))`
-- `erfc_approx(x)` for x >= 0: Horner-form polynomial `t * (a1 + t*(a2 + t*(a3 + t*(a4 + t*a5)))) * exp(-x^2)` where `t = 1/(1 + 0.3275911*x)`
-- Coefficients: `a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027, a5=1.061405429`
-- For x < 0: `erfc(-x) = 2 - erfc(x)`
+Delegates to `hft_statistics::statistics::phi` (Abramowitz & Stegun 7.1.26, Hart 1968 coefficients) with a NaN-propagation guard. `phi(NaN)` returns 0.0 by convention, but BSM callers need NaN sentinel propagation — the thin wrapper preserves this contract while eliminating local polynomial duplication (Phase 2A-3, 2026-05-27).
+- Accuracy: |error| < 7.5e-8 (verified: max observed error 6.92e-8)
 
 **norm_pdf:** `N'(x) = exp(-x^2/2) / sqrt(2*pi)`
 
@@ -652,26 +665,26 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 - 0DTE ATM call/put IV distributions (reservoir)
 - IV by DTE bucket (4 buckets, Welford)
 - Intraday 0DTE ATM IV curve (390-bin)
-- 0DTE ATM delta (absolute value), gamma, vega distributions (reservoir)
+- 0DTE ATM call/put delta (signed, separate distributions), gamma, vega distributions (reservoir)
 - IV computation success rate: `iv_computed / (iv_computed + iv_failed)`
 - ATM quote count and sample interval
 
 **Filters:** Only processes ATM events with valid BBO and positive mid. Non-ATM events are entirely skipped.
 
-**IV sampling gate:** IV computation is expensive. Only computed every Nth qualifying ATM quote (`atm_quote_count % iv_sample_interval != 0` -> skip). Default interval: 100.
+**IV sampling gate:** IV computation is expensive. Only computed every Nth qualifying ATM quote (`atm_sample_counter % iv_sample_interval != 0` -> skip). Default interval: 100. The sample counter is initialized to `iv_sample_interval - 1` so the first ATM event of each day triggers IV computation, and reset to `iv_sample_interval - 1` in `reset_day()` (Phase 2B-3 fix).
 
-**Important:** `atm_quote_count` is NOT reset across days -- it is a continuous counter (see D4).
+**`atm_quote_count`** is a monotonically increasing counter of total qualifying ATM events seen (never reset). `atm_sample_counter` is the internal sampling gate counter (reset per day).
 
 **Time-to-expiry calculation:**
 - 0DTE: Estimate minutes remaining from timestamp. Close at 16:00 ET. `remaining_ns = (close_utc_ns - event_tod_ns).max(0)`. Convert to minutes, **clamp to `min(390.0)`** so that pre-market events (e.g., 04:00 ET) correctly map to one full RTH session of trading time rather than the inflated calendar interval. Then `bsm::minutes_to_years()` (252-day year, 390 min/day).
 - Non-0DTE: `dte as f64 / 365.0` (calendar days, see D2). Clamped to min 1e-6.
 
-**IV filter:** Only accepts IV where `sigma.is_finite() && sigma > 0.0 && sigma < 5.0` (see D3). Outside this range counts as `iv_failed`.
+**IV filter:** Only accepts IV where `sigma.is_finite() && sigma > 0.0 && sigma < self.max_iv` (default 5.0, configurable; see D3). Outside this range counts as `iv_failed`.
 
-**Greek computation:** Delta uses absolute value (`d.abs()`). Gamma and vega are stored as-is. All require finite values to be accepted into distributions.
+**Greek computation:** Call and put deltas are stored in separate signed distributions (`dte0_atm_delta_call` ∈ [0,1], `dte0_atm_delta_put` ∈ [-1,0]). Phase 2B-1 removed the prior `.abs()` which collapsed both into an uninformative magnitude-only distribution. Gamma and vega are stored as-is. All require finite values to be accepted into distributions.
 
 **hft-statistics types:**
-- `StreamingDistribution` (5 instances: dte0_atm_call_iv, dte0_atm_put_iv, delta, gamma, vega)
+- `StreamingDistribution` (6 instances: dte0_atm_call_iv, dte0_atm_put_iv, delta_call, delta_put, gamma, vega)
 - `WelfordAccumulator` (4 instances: per-DTE-bucket IV)
 - `IntradayCurveAccumulator` (1 instance: dte0_atm_iv_curve)
 
@@ -679,7 +692,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 - `GreeksTracker::new(risk_free_rate, reservoir_capacity)` -- default iv_sample_interval=100
 - `GreeksTracker::with_sample_interval(risk_free_rate, reservoir_capacity, iv_sample_interval)` -- explicit interval (clamped to min 1)
 
-**Output JSON keys:** `tracker`, `n_days`, `atm_quote_count`, `iv_sample_interval`, `iv_computed`, `iv_failed`, `iv_success_rate`, `dte0_atm_call_iv`, `dte0_atm_put_iv`, `dte0_atm_delta`, `dte0_atm_gamma`, `dte0_atm_vega`, `iv_by_dte` (0dte/1dte/2_7dte/other, each with mean/std/count), `intraday_dte0_atm_iv_curve`.
+**Output JSON keys:** `tracker`, `n_days`, `atm_quote_count`, `iv_sample_interval`, `iv_computed`, `iv_failed`, `iv_success_rate`, `dte0_atm_call_iv`, `dte0_atm_put_iv`, `dte0_atm_delta_call`, `dte0_atm_delta_put`, `dte0_atm_gamma`, `dte0_atm_vega`, `iv_by_dte` (0dte/1dte/2_7dte/other, each with mean/std/count), `intraday_dte0_atm_iv_curve`.
 
 ---
 
@@ -922,13 +935,13 @@ reservoir_capacity = 10000
 
 For 0DTE contracts, time-to-expiry is computed using 252 trading days per year and 390 minutes per trading day (via `bsm::minutes_to_years()`). For non-0DTE contracts, time-to-expiry uses 365 calendar days (`dte as f64 / 365.0`). This split follows industry convention: 0DTE requires trading-day granularity because the remaining lifetime is measured in hours, while longer-dated options use calendar days. The 252/365 discontinuity at the 0DTE/1DTE boundary is accepted.
 
-### D3: IV cap mismatch between tracker and solver
+### D3: IV cap — configurable dual threshold (Phase 2B-2)
 
-The GreeksTracker filters computed IV at `sigma < 5.0` (500% annualized), rejecting anything above as unreasonable for statistical profiling. The BSM solver itself allows up to `MAX_IV = 10.0` (1000%) during Newton-Raphson iteration. This two-tier approach means the solver can converge on extreme values that the tracker then discards, which is intentional: the solver should not artificially constrain convergence, but the profiler should not pollute aggregate statistics with extreme outliers.
+The GreeksTracker filters computed IV at `sigma < self.max_iv` (default 5.0 = 500% annualized), rejecting anything above as unreasonable for statistical profiling. The BSM solver itself allows up to `MAX_IV = 10.0` (1000%) during Newton-Raphson iteration. This two-tier approach is intentional: the solver should not artificially constrain convergence, but the profiler should not pollute aggregate statistics with extreme outliers. The tracker-level threshold is now configurable via the `max_iv` field (Phase 2B-2).
 
-### D4: atm_quote_count not reset across days
+### D4: IV sampling — per-day reset (Phase 2B-3, supersedes original design)
 
-The `GreeksTracker.atm_quote_count` counter (used for IV sampling: compute every Nth ATM quote) is intentionally NOT reset in `reset_day()`. This provides continuous uniform sampling across the full dataset rather than per-day sampling with potential phase alignment artifacts. The IV sample interval can be configured via `with_sample_interval()` but is not exposed in the TOML config (see D7).
+The `GreeksTracker.atm_sample_counter` (used for IV sampling: compute every Nth ATM quote) is initialized to `iv_sample_interval - 1` and reset to `iv_sample_interval - 1` in `reset_day()`. This ensures the FIRST qualifying ATM event of EACH trading day triggers IV computation, eliminating the prior systematic early-day sampling bias (adversarial review caught that resetting to 0 would exclude the first ~100 ATM events per day — the highest-volatility open period). `atm_quote_count` is a separate monotonically increasing counter of total ATM events (never reset). The IV sample interval can be configured via `with_sample_interval()` but is not exposed in the TOML config (see D7).
 
 ### D5: _risk_free_rate stored for future use
 
@@ -972,7 +985,8 @@ All tests are inline (`#[cfg(test)]` modules within each source file). No integr
 | File | Tests | Description |
 |------|-------|-------------|
 | `contract.rs` | 12 | OCC parsing: standard call/put, fractional/small/large strikes, LEAPS expiry, DTE, 0DTE, malformed (too short, bad type, bad date, empty root) |
-| `bsm.rs` | 18 | norm_cdf known values, BSM call/put prices, put-call parity (5 strikes), delta (ATM/deep ITM/deep OTM), gamma (positive, peak at ATM), vega (positive), IV recovery (call, put), IV edge cases (zero price, below intrinsic, 0DTE ATM), minutes_to_years, near-expiry no-panic. (Theta test removed with F-017 cleanup 2026-05-08.) |
+| `bsm.rs` | 18 | norm_cdf known values + NaN propagation (Phase 2A-3), BSM call/put prices, put-call parity (5 strikes), delta (ATM/deep ITM/deep OTM), gamma (positive, peak at ATM), vega (positive), IV recovery (call, put), IV edge cases (zero price, below intrinsic, 0DTE ATM), minutes_to_years, near-expiry no-panic. (Theta test removed with F-017 cleanup 2026-05-08.) |
+| `diagnostics.rs` | 5 | Conservation law valid/violated, serde roundtrip, forward-compat partial JSON, default is zero. (Phase 2A-2.) |
 | `event.rs` | 6 | F-NEW-R5-1 BBO accessor strictness invariant: boundary triplet `{ask > bid, ask == bid, ask < bid}` + NaN bid / NaN ask, parametric cross-accessor finiteness lock. Plus 1 ignored `test_intraday_underlying_reflected_in_event_underlying_price` (F-013 FIND-UFO contract-lock, blocked on Axis L) |
 | `loader.rs` | 0 | F-003 decode_errors counter is regression-tested at the integration level — DEFERRED to Phase 2 (requires corrupt-DBN file-system fixture under `tests/fixtures/`) |
 | `moneyness.rs` | 11 | Call ATM/ATM-edge/ITM/deep-ITM/OTM/deep-OTM, put ATM/ITM/OTM, invalid underlying (0, negative, NaN), ratio computation |
@@ -981,11 +995,11 @@ All tests are inline (`#[cfg(test)]` modules within each source file). No integr
 | `spread.rs` | 4 | Spread computation (0.05 USD), sentinel filtering, 0DTE ATM tracking, finalize structure |
 | `premium_decay.rs` | 3 | First/last premium tracking with decay calculation (~73%), empty day handling, finalize structure |
 | `volume.rs` | 4 | Trade-only counting, PCR with zero calls, DTE bucketing, finalize structure |
-| `greeks.rs` | 4 | IV computation fires for ATM, IV sampling with interval (500/10=50), non-ATM ignored, finalize structure |
+| `greeks.rs` | 6 | IV computation fires for ATM, IV sampling with interval (500/10=50), non-ATM ignored, finalize structure, call delta positive / put delta negative (Phase 2B-1), IV sampling resets per day (Phase 2B-3) |
 | `zero_dte.rs` | 4 | Non-0DTE filtered, non-ATM filtered, 0DTE ATM counting, call/put separation |
 | `put_call.rs` | 4 | PCR computation (50/100=0.5), no-calls-no-PCR, day rollover, finalize structure |
 | `effective_spread.rs` | 6 | size_bucket_index, effective spread formula (2*|1.08-1.05|=0.06), trade-through classification (inside/at/outside BBO), quotes ignored, zero-size ignored, finalize structure |
-| **Total** | **84 + 1 ignored** | |
+| **Total** | **91 + 1 ignored** | |
 
 ---
 
