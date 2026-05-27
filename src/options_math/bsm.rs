@@ -39,37 +39,17 @@ const MAX_IV: f64 = 10.0;
 /// Minimum reasonable IV.
 const MIN_IV: f64 = 1e-6;
 
-/// Standard normal CDF via Hart (1968) rational approximation.
+/// Standard normal CDF. Delegates to `hft_statistics::phi` (Abramowitz & Stegun
+/// 7.1.26, Hart 1968 coefficients, |error| < 7.5e-8) with a NaN-propagation guard.
 ///
-/// Accuracy: |error| < 7.5e-8.
-///
-/// Uses the relation N(x) = 0.5 * erfc(-x / sqrt(2)) implemented via
-/// the Horner-form rational approximation from Hart et al., "Computer
-/// Approximations", Wiley, 1968.
+/// `hft_statistics::phi(NaN)` returns 0.0 (by convention), but BSM callers need
+/// NaN sentinel propagation to detect degenerate inputs. This wrapper preserves
+/// the NaN contract while eliminating the local polynomial duplication.
 fn norm_cdf(x: f64) -> f64 {
     if x.is_nan() {
         return f64::NAN;
     }
-    // Use the identity: N(x) = 0.5 * erfc(-x / sqrt(2))
-    // Implement erfc via Abramowitz & Stegun 7.1.26 with constants from Hart (1968).
-    0.5 * erfc_approx(-x * std::f64::consts::FRAC_1_SQRT_2)
-}
-
-/// Complementary error function approximation.
-///
-/// erfc(x) = 1 - erf(x), where erf is the error function.
-/// For x >= 0, uses rational approximation. For x < 0, uses erfc(-x) = 2 - erfc(x).
-fn erfc_approx(x: f64) -> f64 {
-    if x < 0.0 {
-        return 2.0 - erfc_approx(-x);
-    }
-
-    // Abramowitz & Stegun 7.1.26
-    let t = 1.0 / (1.0 + 0.3275911 * x);
-    let poly = t
-        * (0.254829592
-            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-    poly * (-x * x).exp()
+    hft_statistics::statistics::phi(x)
 }
 
 /// Standard normal PDF.
@@ -247,6 +227,10 @@ mod tests {
         assert!((norm_cdf(1.0) - 0.8413447).abs() < 1e-5);
         assert!((norm_cdf(-1.0) - 0.1586553).abs() < 1e-5);
         assert!((norm_cdf(2.0) - 0.9772499).abs() < 1e-5);
+        assert!(
+            norm_cdf(f64::NAN).is_nan(),
+            "norm_cdf(NaN) must propagate NaN"
+        );
     }
 
     #[test]

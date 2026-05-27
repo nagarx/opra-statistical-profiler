@@ -23,16 +23,22 @@ pub struct GreeksTracker {
     // Intraday IV curve (390-bin) for 0DTE ATM contracts (both calls and puts contribute)
     dte0_atm_iv_curve: IntradayCurveAccumulator,
 
-    // Delta/gamma for 0DTE ATM
-    dte0_atm_delta: StreamingDistribution,
+    // Delta/gamma for 0DTE ATM — call and put deltas stored separately
+    // to preserve sign (call delta ∈ [0,1], put delta ∈ [-1,0]).
+    dte0_atm_delta_call: StreamingDistribution,
+    dte0_atm_delta_put: StreamingDistribution,
     dte0_atm_gamma: StreamingDistribution,
     dte0_atm_vega: StreamingDistribution,
 
-    // IV by DTE bucket: [0dte, 1dte, weekly, other]
+    // IV by DTE bucket: [0dte, 1dte, 2_7dte, other]
     dte_bucket_iv: [WelfordAccumulator; 4],
 
     risk_free_rate: f64,
-    /// Counts every qualifying ATM event (used for sampling gate).
+    max_iv: f64,
+    /// Internal sampling counter (initialized to `iv_sample_interval - 1` so
+    /// the first ATM event of each day triggers IV computation).
+    atm_sample_counter: u64,
+    /// Total qualifying ATM events seen (monotonically increasing, never reset).
     atm_quote_count: u64,
     /// How often to compute IV (every Nth qualifying ATM quote).
     iv_sample_interval: u64,
@@ -51,18 +57,22 @@ impl GreeksTracker {
         reservoir_capacity: usize,
         iv_sample_interval: u64,
     ) -> Self {
+        let interval = iv_sample_interval.max(1);
         Self {
             utc_offset: -5,
             dte0_atm_call_iv: StreamingDistribution::new(reservoir_capacity),
             dte0_atm_put_iv: StreamingDistribution::new(reservoir_capacity),
             dte0_atm_iv_curve: IntradayCurveAccumulator::new_rth_1min(),
-            dte0_atm_delta: StreamingDistribution::new(reservoir_capacity),
+            dte0_atm_delta_call: StreamingDistribution::new(reservoir_capacity),
+            dte0_atm_delta_put: StreamingDistribution::new(reservoir_capacity),
             dte0_atm_gamma: StreamingDistribution::new(reservoir_capacity),
             dte0_atm_vega: StreamingDistribution::new(reservoir_capacity),
             dte_bucket_iv: std::array::from_fn(|_| WelfordAccumulator::new()),
             risk_free_rate,
+            max_iv: 5.0,
+            atm_sample_counter: interval - 1,
             atm_quote_count: 0,
-            iv_sample_interval: iv_sample_interval.max(1),
+            iv_sample_interval: interval,
             iv_computed: 0,
             iv_failed: 0,
             n_days: 0,
@@ -88,7 +98,8 @@ impl OptionsTracker for GreeksTracker {
         // IV computation is expensive — only compute for a sample of events.
         // Sample every Nth qualifying ATM quote to keep throughput high.
         self.atm_quote_count += 1;
-        if self.atm_quote_count % self.iv_sample_interval != 0 {
+        self.atm_sample_counter += 1;
+        if self.atm_sample_counter % self.iv_sample_interval != 0 {
             return;
         }
 
@@ -116,7 +127,7 @@ impl OptionsTracker for GreeksTracker {
 
         let iv = bsm::implied_vol(mid, s, k, t, self.risk_free_rate, is_call);
         match iv {
-            Some(sigma) if sigma.is_finite() && sigma > 0.0 && sigma < 5.0 => {
+            Some(sigma) if sigma.is_finite() && sigma > 0.0 && sigma < self.max_iv => {
                 self.iv_computed += 1;
 
                 let di = crate::report_utils::dte_bucket_index(event.dte);
@@ -134,7 +145,11 @@ impl OptionsTracker for GreeksTracker {
                     let d = bsm::delta(s, k, t, self.risk_free_rate, sigma, is_call);
                     let g = bsm::gamma(s, k, t, self.risk_free_rate, sigma);
                     if d.is_finite() {
-                        self.dte0_atm_delta.add(d.abs());
+                        if is_call {
+                            self.dte0_atm_delta_call.add(d);
+                        } else {
+                            self.dte0_atm_delta_put.add(d);
+                        }
                     }
                     if g.is_finite() {
                         self.dte0_atm_gamma.add(g);
@@ -155,7 +170,9 @@ impl OptionsTracker for GreeksTracker {
         self.n_days += 1;
     }
 
-    fn reset_day(&mut self) {}
+    fn reset_day(&mut self) {
+        self.atm_sample_counter = self.iv_sample_interval - 1;
+    }
 
     fn finalize(&self) -> serde_json::Value {
         let mut iv_by_dte = serde_json::Map::new();
@@ -197,7 +214,8 @@ impl OptionsTracker for GreeksTracker {
             } else { 0.0 },
             "dte0_atm_call_iv": self.dte0_atm_call_iv.summary(),
             "dte0_atm_put_iv": self.dte0_atm_put_iv.summary(),
-            "dte0_atm_delta": self.dte0_atm_delta.summary(),
+            "dte0_atm_delta_call": self.dte0_atm_delta_call.summary(),
+            "dte0_atm_delta_put": self.dte0_atm_delta_put.summary(),
             "dte0_atm_gamma": self.dte0_atm_gamma.summary(),
             "dte0_atm_vega": self.dte0_atm_vega.summary(),
             "iv_by_dte": iv_by_dte,
@@ -276,6 +294,66 @@ mod tests {
         assert_eq!(r["tracker"], "GreeksTracker");
         assert!(r.get("iv_by_dte").is_some());
         assert!(r.get("dte0_atm_call_iv").is_some());
+        assert!(r.get("dte0_atm_delta_call").is_some());
+        assert!(r.get("dte0_atm_delta_put").is_some());
         assert!(r.get("intraday_dte0_atm_iv_curve").is_some());
+    }
+
+    #[test]
+    fn test_call_delta_positive_put_delta_negative() {
+        let mut t = GreeksTracker::with_sample_interval(0.05, 1000, 1);
+        t.begin_day(&make_day_context());
+
+        let call = make_contract_call(190.0);
+        let ce = make_quote_event(&call, 3.00, 3.20, 0, Moneyness::Atm);
+        t.process_event(&ce, 0);
+
+        let put = make_contract_put(190.0);
+        let pe = make_quote_event(&put, 2.80, 3.00, 0, Moneyness::Atm);
+        t.process_event(&pe, 0);
+
+        t.end_of_day(0);
+        let r = t.finalize();
+
+        let call_delta_mean = r["dte0_atm_delta_call"]["mean"].as_f64();
+        let put_delta_mean = r["dte0_atm_delta_put"]["mean"].as_f64();
+
+        if let Some(cd) = call_delta_mean {
+            assert!(cd > 0.0, "Call delta should be positive, got {}", cd);
+        }
+        if let Some(pd) = put_delta_mean {
+            assert!(pd < 0.0, "Put delta should be negative, got {}", pd);
+        }
+    }
+
+    #[test]
+    fn test_iv_sampling_resets_per_day() {
+        let mut t = GreeksTracker::with_sample_interval(0.05, 1000, 10);
+        t.begin_day(&make_day_context());
+        let c = make_contract_call(190.0);
+
+        // First event of day 1 triggers IV (atm_sample_counter initialized to interval-1=9,
+        // increments to 10, 10 % 10 == 0 → fires).
+        let e = make_quote_event(&c, 1.50, 1.60, 0, Moneyness::Atm);
+        t.process_event(&e, 0);
+        let day1_first = t.iv_computed + t.iv_failed;
+        assert!(
+            day1_first >= 1,
+            "First ATM event of day 1 should trigger IV computation"
+        );
+
+        t.end_of_day(0);
+        t.reset_day();
+
+        // First event of day 2 also triggers IV (counter reset to interval-1 by reset_day)
+        t.begin_day(&make_day_context());
+        let before = t.iv_computed + t.iv_failed;
+        let e2 = make_quote_event(&c, 1.50, 1.60, 0, Moneyness::Atm);
+        t.process_event(&e2, 0);
+        let after = t.iv_computed + t.iv_failed;
+        assert!(
+            after > before,
+            "First ATM event of day 2 should trigger IV after reset_day"
+        );
     }
 }

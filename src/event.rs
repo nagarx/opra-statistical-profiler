@@ -80,6 +80,25 @@ pub struct OptionsEvent<'a> {
     pub moneyness_ratio: f64,
     /// Current underlying stock price in USD.
     pub underlying_price: f64,
+
+    // ── CbboMsg fields previously unread (Phase 2A-1, 2026-05-27) ──
+    /// Originating venue for this event (`RecordHeader.publisher_id`).
+    /// Maps to `dbn::Publisher` enum via `Publisher::try_from(u16)`.
+    pub publisher_id: u16,
+    /// Venue holding the best bid at consolidated NBBO (`ConsolidatedBidAskPair.bid_pb`).
+    pub bid_pb: u16,
+    /// Venue holding the best ask at consolidated NBBO (`ConsolidatedBidAskPair.ask_pb`).
+    pub ask_pb: u16,
+    /// SIP-vs-exchange-send latency delta in nanoseconds, capped at 2 seconds
+    /// (`CbboMsg.ts_in_delta`). Zero if unavailable.
+    pub ts_in_delta: i32,
+    /// Raw dbn FlagSet byte (`CbboMsg.flags.raw()`).
+    /// Bit positions: MAYBE_BAD_BOOK=0x04, BAD_TS_RECV=0x08, SNAPSHOT=0x20.
+    pub flags: u8,
+    /// Venue-assigned message sequence number (`CbboMsg.sequence`).
+    pub sequence: u32,
+    /// Capture-server timestamp in UTC nanoseconds (`CbboMsg.ts_recv`).
+    pub ts_recv: i64,
 }
 
 impl<'a> OptionsEvent<'a> {

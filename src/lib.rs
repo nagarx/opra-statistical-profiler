@@ -28,6 +28,7 @@
 
 pub mod config;
 pub mod contract;
+pub mod diagnostics;
 pub mod event;
 pub mod loader;
 pub mod options_math;
@@ -61,8 +62,9 @@ pub trait OptionsTracker: Send {
 
     /// Process a single enriched options event.
     ///
-    /// The `regime` parameter is reserved for future time-of-day regime analysis.
-    /// Currently unused by all trackers (passed as 0).
+    /// The `regime` parameter is the 7-class intraday time regime from
+    /// `hft_statistics::time::regime::time_regime` (0=pre-market through 6=post-market).
+    /// Currently unused by all trackers but available for per-regime analysis.
     fn process_event(&mut self, event: &OptionsEvent, regime: u8);
 
     /// Called when a day boundary is detected.

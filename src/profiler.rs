@@ -10,14 +10,22 @@ use chrono::NaiveDate;
 
 use crate::config::ProfilerConfig;
 use crate::contract::ContractMap;
+use crate::diagnostics::ProfileDiagnostics;
 use crate::event::{Action, DayContext, OptionsEvent, Side};
 use crate::loader::Cmbp1Loader;
 use crate::options_math::moneyness::{Moneyness, MoneynessBuckets};
 use crate::OptionsTracker;
 
-use hft_statistics::time::regime::{midnight_utc_ns, utc_offset_for_date};
+use hft_statistics::time::regime::{midnight_utc_ns, time_regime, utc_offset_for_date};
 
 const SENTINEL_I64: i64 = i64::MAX;
+
+/// SemVer for the per-tracker JSON output schema.
+///
+/// Policy: MAJOR for breaking changes (field renames/removals), MINOR for
+/// additive changes (new fields), PATCH for bugfix-only (no schema change).
+/// Emitted in every `_provenance.output_schema_version` block.
+pub const OUTPUT_SCHEMA_VERSION: &str = "2.0.0";
 
 /// Profiling result.
 pub struct ProfileResult {
@@ -30,6 +38,8 @@ pub struct ProfileResult {
     pub total_decode_errors: u64,
     pub elapsed_secs: f64,
     pub reports: Vec<(String, serde_json::Value)>,
+    /// Dispatch-loop diagnostic counters with conservation law.
+    pub diagnostics: ProfileDiagnostics,
 }
 
 /// Underlying price for a trading day (from EQUS or config).
@@ -60,6 +70,7 @@ pub fn run(
 
     let mut total_events: u64 = 0;
     let mut total_decode_errors: u64 = 0;
+    let mut diag = ProfileDiagnostics::default();
     let mut day_index: u32 = 0;
 
     for (i, (date_str, file_path)) in files.iter().enumerate() {
@@ -119,19 +130,45 @@ pub fn run(
         // `records.by_ref()` keeps the iterator alive after the loop so we can read
         // the cumulative `decode_errors` counter below (F-003 fix; see loader.rs).
         for record in records.by_ref() {
+            diag.total_decoded += 1;
+
             let contract = match contract_map.get(record.hd.instrument_id) {
                 Some(c) => c,
-                None => continue,
+                None => {
+                    diag.unknown_instrument += 1;
+                    continue;
+                }
             };
+
+            // Flags-based observability (NOT filters — events still dispatched)
+            let flags_raw = record.flags.raw();
+            if flags_raw & 0x04 != 0 {
+                diag.observability.bad_book_flagged += 1;
+            }
+            if flags_raw & 0x08 != 0 {
+                diag.observability.bad_ts_flagged += 1;
+            }
+            if flags_raw & 0x20 != 0 {
+                diag.observability.snapshot_flagged += 1;
+            }
 
             let bid_px = price_or_nan(record.levels[0].bid_px);
             let ask_px = price_or_nan(record.levels[0].ask_px);
             let trade_price = price_or_nan(record.price);
 
             let action = match record.action as u8 {
-                b'T' => Action::Trade,
-                b'A' => Action::Quote,
-                _ => Action::Other,
+                b'T' => {
+                    diag.observability.action_trade += 1;
+                    Action::Trade
+                }
+                b'A' => {
+                    diag.observability.action_quote += 1;
+                    Action::Quote
+                }
+                _ => {
+                    diag.observability.action_other += 1;
+                    Action::Other
+                }
             };
 
             let side = match record.side as u8 {
@@ -146,9 +183,17 @@ pub fn run(
             } else {
                 f64::NAN
             };
-            let moneyness = moneyness_buckets
-                .classify(contract.strike, underlying_estimate, contract.contract_type)
-                .unwrap_or(Moneyness::Otm);
+            let moneyness = match moneyness_buckets.classify(
+                contract.strike,
+                underlying_estimate,
+                contract.contract_type,
+            ) {
+                Some(m) => m,
+                None => {
+                    diag.observability.moneyness_fallback += 1;
+                    Moneyness::Otm
+                }
+            };
 
             let event = OptionsEvent {
                 ts_event: record.hd.ts_event as i64,
@@ -170,10 +215,19 @@ pub fn run(
                 moneyness,
                 moneyness_ratio,
                 underlying_price: underlying_estimate,
+                publisher_id: record.hd.publisher_id,
+                bid_pb: record.levels[0].bid_pb,
+                ask_pb: record.levels[0].ask_pb,
+                ts_in_delta: record.ts_in_delta,
+                flags: record.flags.raw(),
+                sequence: record.sequence,
+                ts_recv: record.ts_recv as i64,
             };
 
             // Reserved for future regime-aware trackers. Currently unused by all trackers.
-            let regime: u8 = 0;
+            let regime = time_regime(record.hd.ts_event as i64, utc_offset);
+
+            diag.dispatched += 1;
 
             for tracker in trackers.iter_mut() {
                 tracker.process_event(&event, regime);
@@ -186,6 +240,7 @@ pub fn run(
         // end of this loop iteration (F-003 — closes silent decode-error swallow).
         let day_decode_errors = records.decode_errors();
         total_decode_errors += day_decode_errors;
+        diag.decode_errors += day_decode_errors;
 
         for tracker in trackers.iter_mut() {
             tracker.end_of_day(day_index);
@@ -234,12 +289,21 @@ pub fn run(
         total_events as f64 / elapsed.max(0.001),
     );
 
+    debug_assert!(
+        diag.conservation_check(),
+        "BUG: conservation law violated: total_decoded({}) != unknown_instrument({}) + dispatched({})",
+        diag.total_decoded,
+        diag.unknown_instrument,
+        diag.dispatched
+    );
+
     Ok(ProfileResult {
         n_days: day_index,
         total_events,
         total_decode_errors,
         elapsed_secs: elapsed,
         reports,
+        diagnostics: diag,
     })
 }
 
@@ -263,6 +327,7 @@ pub fn write_output(
 
     let provenance = serde_json::json!({
         "profiler_version": env!("CARGO_PKG_VERSION"),
+        "output_schema_version": OUTPUT_SCHEMA_VERSION,
         "symbol": config.input.symbol,
         "dataset": "OPRA.PILLAR",
         "schema": "cmbp-1",
@@ -270,9 +335,9 @@ pub fn write_output(
         "total_events": result.total_events,
         "runtime_secs": result.elapsed_secs,
         "throughput_events_per_sec": result.total_events as f64 / result.elapsed_secs.max(0.001),
-        "diagnostics": {
-            "decode_errors": result.total_decode_errors,
-        },
+        "diagnostics_schema_version": crate::diagnostics::PROFILER_DIAGNOSTICS_SCHEMA_VERSION,
+        "diagnostics": &result.diagnostics,
+        "conservation_check": result.diagnostics.conservation_check(),
         "config": serde_json::to_value(config).unwrap_or_default(),
     });
 
