@@ -141,5 +141,11 @@ fn dp(y: i32, m: u32, d: u32, open: f64, close: f64) -> DailyUnderlyingPrice {
         date: NaiveDate::from_ymd_opt(y, m, d).unwrap(),
         open,
         close,
+        // Fallback is open/close-only (for moneyness/Greeks). O/S requires equity
+        // SHARE volume, which only the EQUS underlying_prices_file carries; volume=0
+        // here ⇒ O/S=null in fallback mode (a documented degradation — the real run
+        // configures underlying_prices_file). profiler::run warns loudly if O/S is
+        // enabled while every underlying volume is 0.
+        volume: 0,
     }
 }

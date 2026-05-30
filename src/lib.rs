@@ -32,6 +32,7 @@ pub mod diagnostics;
 pub mod event;
 pub mod loader;
 pub mod options_math;
+pub mod os_ratio;
 pub mod profiler;
 pub mod report_utils;
 #[cfg(test)]

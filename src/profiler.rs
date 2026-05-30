@@ -25,7 +25,7 @@ const SENTINEL_I64: i64 = i64::MAX;
 /// Policy: MAJOR for breaking changes (field renames/removals), MINOR for
 /// additive changes (new fields), PATCH for bugfix-only (no schema change).
 /// Emitted in every `_provenance.output_schema_version` block.
-pub const OUTPUT_SCHEMA_VERSION: &str = "2.0.0";
+pub const OUTPUT_SCHEMA_VERSION: &str = "2.1.0"; // 2.1.0: additive — NN_OsRatio.json (Cycle 27)
 
 /// Profiling result.
 pub struct ProfileResult {
@@ -42,11 +42,16 @@ pub struct ProfileResult {
     pub diagnostics: ProfileDiagnostics,
 }
 
-/// Underlying price for a trading day (from EQUS or config).
+/// Underlying market data for a trading day (from EQUS or the built-in fallback).
 pub struct DailyUnderlyingPrice {
     pub date: NaiveDate,
     pub open: f64,
     pub close: f64,
+    /// Total consolidated equity SHARE volume for the day (EQUS `OhlcvMsg.volume`).
+    /// The O/S-ratio denominator (Johnson-So 2012). `0` in built-in fallback mode
+    /// (open/close-only), which yields a null O/S — see `os_ratio` + the run()
+    /// fallback-mode warning.
+    pub volume: u64,
 }
 
 /// Run the OPRA profiler.
@@ -72,6 +77,15 @@ pub fn run(
     let mut total_decode_errors: u64 = 0;
     let mut diag = ProfileDiagnostics::default();
     let mut day_index: u32 = 0;
+
+    // O/S-ratio (Johnson-So 2012) per-day numerator accumulation. The 5-35-DTE
+    // option-contract volume is a DIFFERENT quantity from VolumeTracker's all-DTE
+    // total, so it is accumulated fresh here (the one site with access to both the
+    // option events and the equity-volume denominator). See os_ratio module.
+    let os_enabled = config.os_ratio.enabled;
+    let os_dte_min = config.os_ratio.dte_min;
+    let os_dte_max = config.os_ratio.dte_max;
+    let mut os_daily_opvol: Vec<(NaiveDate, u64)> = Vec::new();
 
     for (i, (date_str, file_path)) in files.iter().enumerate() {
         let day_start = Instant::now();
@@ -125,6 +139,7 @@ pub fn run(
         let contract_map = ContractMap::from_dbn_metadata(&metadata, dbn_date);
 
         let mut day_events: u64 = 0;
+        let mut day_opvol_os: u64 = 0;
 
         // FIND-UFO partial fix: interpolate underlying price between EQUS daily
         // open and close using session progress. This captures directional drift
@@ -254,6 +269,18 @@ pub fn run(
                 tracker.process_event(&event, regime);
             }
 
+            // O/S numerator: 5-35-DTE option-contract trade volume (Johnson-So
+            // footnote 9). `trade_size` is 0 for non-trades, so a zero-size trade
+            // print contributes 0 — no explicit `trade_size != 0` guard is needed
+            // here (VolumeTracker adds one only to skip its distribution updates).
+            if os_enabled
+                && event.is_trade()
+                && event.dte >= os_dte_min
+                && event.dte <= os_dte_max
+            {
+                day_opvol_os += event.trade_size as u64;
+            }
+
             day_events += 1;
         }
 
@@ -268,6 +295,9 @@ pub fn run(
         }
 
         total_events += day_events;
+        if os_enabled {
+            os_daily_opvol.push((trading_date, day_opvol_os));
+        }
         day_index += 1;
 
         let day_elapsed = day_start.elapsed().as_secs_f64();
@@ -296,10 +326,32 @@ pub fn run(
         }
     }
 
-    let reports: Vec<(String, serde_json::Value)> = trackers
+    let mut reports: Vec<(String, serde_json::Value)> = trackers
         .iter()
         .map(|t| (t.name().to_string(), t.finalize()))
         .collect();
+
+    // O/S ratio (Johnson-So 2012) — appended after the trackers so it lands as the
+    // last numbered output (e.g. 09_OsRatio.json with the default 8-tracker set; the
+    // numeric prefix is positional). Computed post-loop because O/S joins the per-day
+    // option volume with the per-day equity-volume denominator.
+    if os_enabled {
+        let eqvol_per_day: Vec<(NaiveDate, u64)> =
+            underlying_prices.iter().map(|p| (p.date, p.volume)).collect();
+        if eqvol_per_day.iter().all(|(_, v)| *v == 0) {
+            log::warn!(
+                "O/S enabled but all underlying volumes are 0 (fallback-price mode?); O/S will be null. Provide underlying_prices_file (EQUS OHLCV) for a runnable O/S."
+            );
+        }
+        let os_report = crate::os_ratio::compute_os_series(
+            &os_daily_opvol,
+            &eqvol_per_day,
+            config.os_ratio.rolling_window_days,
+            os_dte_min,
+            os_dte_max,
+        );
+        reports.push(("OsRatio".to_string(), os_report));
+    }
 
     let elapsed = start.elapsed().as_secs_f64();
     log::info!(
@@ -473,6 +525,7 @@ pub fn load_underlying_prices_from_equs(
                     date: d,
                     open,
                     close,
+                    volume: record.volume,
                 });
             }
         }
@@ -485,4 +538,41 @@ pub fn load_underlying_prices_from_equs(
         path.display()
     );
     Ok(prices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Integration: load the REAL EQUS NVDA OHLCV file and confirm the O/S-ratio
+    /// denominator off-ramp (Cycle 27) is wired — `DailyUnderlyingPrice.volume` is
+    /// populated with nonzero equity SHARE volume from `OhlcvMsg.volume`. `#[ignore]`
+    /// because it reads a real (large, gitignored) data file; run on demand with
+    /// `cargo test -- --ignored equs_volume_offramp`.
+    #[test]
+    #[ignore = "reads real EQUS data; run with --ignored to confirm the O/S denominator off-ramp"]
+    fn test_equs_volume_offramp_wired_on_real_data() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../data/EQUS_SUMMARY/NVDA/ohlcv1d_2025-02-03_to_2026-03-05/equs-summary-20250203-20260305.ohlcv-1d.dbn.zst",
+        );
+        let prices = load_underlying_prices_from_equs(&path).expect("EQUS file must load");
+        assert!(!prices.is_empty(), "EQUS load returned no days");
+        let with_volume = prices.iter().filter(|p| p.volume > 0).count();
+        assert!(
+            with_volume > 0,
+            "O/S denominator off-ramp FAILED: no day has nonzero equity volume (OhlcvMsg.volume not wired into DailyUnderlyingPrice)"
+        );
+        // Spot-check the Nov-14 NVDA day is present with a plausible share volume.
+        if let Some(p) = prices
+            .iter()
+            .find(|p| p.date == NaiveDate::from_ymd_opt(2025, 11, 14).unwrap())
+        {
+            assert!(
+                p.volume > 1_000_000,
+                "NVDA daily volume should be > 1M shares, got {}",
+                p.volume
+            );
+        }
+    }
 }
