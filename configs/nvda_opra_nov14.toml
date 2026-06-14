@@ -3,7 +3,7 @@
 reservoir_capacity = 10000
 
 [input]
-data_dir = "../data/OPRA/NVDA/cmbp1_2025-11-13_to_2025-11-25"
+data_dir = "../data/OPRA/NVDA/cmbp1_2025-10-29_to_2025-11-24"
 filename_pattern = "opra-pillar-{date}.cmbp-1.dbn.zst"
 symbol = "NVDA"
 risk_free_rate = 0.05

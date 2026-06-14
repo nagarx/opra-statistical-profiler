@@ -5,11 +5,15 @@
 reservoir_capacity = 10000
 
 [input]
-data_dir = "../data/OPRA/NVDA/cmbp1_2025-11-13_to_2025-11-25"
+# data_dir holds the full merged 19-day OPRA set (2025-10-29..2025-11-24); date_start/end below
+# scope this config to its original 8 days (2025-11-13..2025-11-24). Merged 2026-06-14.
+data_dir = "../data/OPRA/NVDA/cmbp1_2025-10-29_to_2025-11-24"
 filename_pattern = "opra-pillar-{date}.cmbp-1.dbn.zst"
 symbol = "NVDA"
 underlying_prices_file = "../data/EQUS_SUMMARY/NVDA/ohlcv1d_2025-02-03_to_2026-03-05/equs-summary-20250203-20260305.ohlcv-1d.dbn.zst"
 risk_free_rate = 0.05
+date_start = "2025-11-13"
+date_end = "2025-11-24"
 
 [trackers]
 quality = true
