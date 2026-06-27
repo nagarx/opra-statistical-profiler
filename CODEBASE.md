@@ -2,6 +2,8 @@
 
 Deep technical reference for the `opra-statistical-profiler` Rust crate. Covers architecture, every module, all formulas, configuration, and design decisions.
 
+> **Pipeline scope (2026-06-02).** This module is part of an **intraday trading research pipeline** — an experiment-first platform for discovering and validating *any* profitable **intraday** trading edge (no overnight positions), across approach classes (microstructure/HFT, scalping, intraday momentum, intraday statistical arbitrage, …) and instruments (equities, futures, same-day options). The pipeline *originated* as a high-frequency NVDA MBO/LOB microstructure system — that origin explains the "HFT" / "LOB" / "MBO" naming here — and that microstructure-direction program is now one (largely-closed) track among many. **Names are historical; the mission is general.** This module's role: a Rust OPRA options-data profiler — 8 trackers incl. BSM Greeks/IV, moneyness, premium decay (4.1M evt/s); the options-analytics surface (directly relevant to the same-day-options approach class). For the full mission + approach taxonomy + capability-readiness boundary, see root `CLAUDE.md` §Research Scope & Charter (+ `CROSS_ASSET_OFI_FINDINGS_AND_ISSUES_2026_06_01.md` §9).
+
 ---
 
 ## 1. Overview
@@ -858,7 +860,7 @@ Full TOML reference. Example config at `configs/nvda_opra_8day.toml`.
 [input]
 # Directory containing OPRA .dbn.zst files.
 # REQUIRED - no default.
-data_dir = "../data/OPRA/NVDA/cmbp1_2025-11-13_to_2025-11-25"
+data_dir = "../data/OPRA/NVDA/cmbp1_2025-10-29_to_2025-11-24"
 
 # Filename pattern with {date} placeholder (YYYYMMDD).
 # REQUIRED - no default.
