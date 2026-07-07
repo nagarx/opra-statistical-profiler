@@ -18,8 +18,8 @@ High-performance statistical profiler for OPRA options microstructure analysis. 
 | Source LOC | ~4,550 (22 files including binary + diagnostics.rs) |
 | Throughput | ~4.1M events/sec |
 | Architecture | Single-pass composable tracker dispatch |
-| Input | OPRA CMBP-1 `.dbn.zst` (consolidated BBO + trades) |
-| Output | Numbered JSON files with `_provenance` metadata |
+| Input | OPRA CMBP-1 `.dbn.zst` (consolidated BBO + trades) + EQUS OHLCV `.dbn.zst` (underlying open/close **and** the O/S equity-volume denominator) |
+| Output | Numbered JSON files with `_provenance` metadata — **two kinds**: one per-tracker profile per enabled tracker, plus a post-loop O/S-ratio aggregate report (§5.9) |
 
 **Dependencies:**
 - `hft-statistics` (git, github.com/nagarx/hft-statistics.git, pinned to rev `e976ff7`) -- Welford, streaming distribution, intraday curve accumulator, DST-aware time utilities
@@ -77,19 +77,26 @@ For each CbboMsg record:
     +---> Dispatch to ALL enabled trackers:
               tracker.process_event(&event, regime=0)
     |
+    +---> [if os_ratio.enabled] O/S numerator accrual (NOT a tracker):
+              is_trade AND dte in [dte_min, dte_max]
+                  --> day_opvol_os += trade_size
+    |
     v
 End of day:
     tracker.end_of_day(day_index)
     tracker.reset_day()
+    [if os_ratio.enabled] push (trading_date, day_opvol_os) to per-day OPVOL
     |
     v
 After all files:
-    tracker.finalize() --> serde_json::Value
+    tracker.finalize() --> serde_json::Value        (one report per tracker)
+    [if os_ratio.enabled] compute_os_series(OPVOL_per_day, EQVOL_per_day)
+        --> "OsRatio" aggregate report, appended AFTER the trackers (§5.9)
     |
     v
 write_output():
     Insert _provenance (version, symbol, dataset, config, throughput)
-    Write output_dir/{NN}_{TrackerName}.json
+    Write output_dir/{NN}_{TrackerName}.json  (+ trailing NN_OsRatio.json)
 ```
 
 **Day processing lifecycle:**
@@ -100,13 +107,17 @@ write_output():
 4. Build `DayContext`, call `begin_day()` on all trackers
 5. Open `.dbn.zst`, build `ContractMap` from metadata symbology
 6. Set `underlying_estimate = underlying_open` (static for entire day -- see D1)
-7. Iterate all `CbboMsg` records, enrich into `OptionsEvent`, dispatch
+7. Iterate all `CbboMsg` records, enrich into `OptionsEvent`, dispatch (and, when `os_ratio.enabled`, accrue the DTE-banded per-day option trade volume for the O/S numerator)
 8. Call `end_of_day()`, `reset_day()` on all trackers
 9. Repeat for next file
+
+After all days: when `os_ratio.enabled`, join the per-day OPVOL with the per-day EQVOL and emit the O/S-ratio aggregate report (§5.9) — a second output path that does NOT flow through the `OptionsTracker` trait.
 
 **File discovery:** `discover_files()` scans `data_dir` for files matching `filename_pattern` with `{date}` placeholder (YYYYMMDD). Filters by optional `date_start`/`date_end` (inclusive, YYYY-MM-DD format). Results sorted chronologically.
 
 **Underlying prices:** Loaded from EQUS OHLCV `.dbn.zst` via `load_underlying_prices_from_equs()`. Decodes `OhlcvMsg` records, converts nanodollar prices to USD. Falls back to hardcoded NVDA prices for 8-day Nov 2025 window **only when `symbol = "NVDA"`** — non-NVDA symbols without `underlying_prices_file` produce a hard error. Trading dates with no available underlying price (whether from file or fallback) also produce a hard error to prevent silent NaN-poisoning of moneyness classification.
+
+**EQUS feed's dual role.** The same `OhlcvMsg` records supply BOTH the underlying open/close (for moneyness + BSM Greeks) AND the daily equity SHARE volume (`OhlcvMsg.volume`) — the latter is the O/S-ratio EQVOL denominator (§5.9). The built-in fallback carries open/close only (`volume = 0`), so on fallback data (or any open/close-only feed) the O/S report is still emitted but **degrades to all-null** (`os_ratio_summary.n_finite == 0`) with a loud `run()` warning; a runnable (non-null) O/S therefore requires a real EQUS `underlying_prices_file`.
 
 ---
 
@@ -137,13 +148,14 @@ TOML-driven profiler configuration. All fields have defaults except `input.data_
 
 | Struct | Fields | Purpose |
 |--------|--------|---------|
-| `ProfilerConfig` | `input`, `trackers`, `output`, `buckets`, `reservoir_capacity` | Top-level config |
+| `ProfilerConfig` | `input`, `trackers`, `output`, `buckets`, `os_ratio`, `reservoir_capacity` | Top-level config |
 | `InputConfig` | `data_dir`, `filename_pattern`, `symbol`, `underlying_prices_file`, `risk_free_rate`, `date_start`, `date_end` | Data source |
-| `TrackerConfig` | 8 booleans (one per tracker) | Which trackers to enable |
+| `TrackerConfig` | one boolean per tracker | Which trackers to enable |
 | `OutputConfig` | `output_dir`, `write_summaries` | Output paths |
 | `BucketConfig` | `atm_range_pct`, `deep_range_pct` | Moneyness classification thresholds |
+| `OsRatioConfig` | `enabled`, `rolling_window_days`, `dte_min`, `dte_max` | O/S-ratio aggregate output (§5.9, §7) |
 
-All 5 structs use `#[serde(deny_unknown_fields)]` — typos or misplaced keys cause a parse error with a clear "unknown field X, expected Y or Z" message. This catches the class of bug where a top-level field is accidentally placed under a section header.
+Every config struct (the `ProfilerConfig` field types above) uses `#[serde(deny_unknown_fields)]` — typos or misplaced keys cause a parse error with a clear "unknown field X, expected Y or Z" message. This catches the class of bug where a top-level field is accidentally placed under a section header.
 
 **Defaults:**
 
@@ -157,6 +169,9 @@ All 5 structs use `#[serde(deny_unknown_fields)]` — typos or misplaced keys ca
 | `atm_range_pct` | `0.02` (+/- 2%) | f64 |
 | `deep_range_pct` | `0.10` (10%) | f64 |
 | All tracker enables | `true` | bool |
+| `os_ratio.enabled` | `true` | bool |
+| `os_ratio.rolling_window_days` | `6` | usize |
+| `os_ratio.dte_min` / `dte_max` | `5` / `35` | i64 |
 
 **Method:** `ProfilerConfig::from_file(path) -> Result<Self>` -- reads TOML file, deserializes via serde.
 
@@ -305,24 +320,24 @@ Single-pass profiling engine. Orchestrates file discovery, day processing, event
 | Constant | Value | Purpose |
 |----------|-------|---------|
 | `SENTINEL_I64` | `i64::MAX` | dbn sentinel for undefined prices |
-| `OUTPUT_SCHEMA_VERSION` | `"2.0.0"` | SemVer for per-tracker JSON output schema (Phase 2A-5) |
+| `OUTPUT_SCHEMA_VERSION` | `&str` (see the constant + its changelog comment in `profiler.rs`) | SemVer for the per-tracker JSON output schema; additive-bumped when the `OsRatio` aggregate report was added. Emitted in `_provenance.output_schema_version`. |
 
 **Types:**
 
 | Type | Fields | Description |
 |------|--------|-------------|
-| `ProfileResult` | `n_days: u32`, `total_events: u64`, `total_decode_errors: u64`, `elapsed_secs: f64`, `reports: Vec<(String, Value)>`, `diagnostics: ProfileDiagnostics` | Profiling output |
-| `DailyUnderlyingPrice` | `date: NaiveDate`, `open: f64`, `close: f64` | Per-day underlying OHLCV |
+| `ProfileResult` | `n_days: u32`, `total_events: u64`, `total_decode_errors: u64`, `elapsed_secs: f64`, `reports: Vec<(String, Value)>`, `diagnostics: ProfileDiagnostics` | Profiling output. `reports` holds one entry per tracker plus (when `os_ratio.enabled`) a trailing `("OsRatio", …)` aggregate. |
+| `DailyUnderlyingPrice` | `date: NaiveDate`, `open: f64`, `close: f64`, `volume: u64` | Per-day underlying OHLCV. `volume` (EQUS `OhlcvMsg.volume`) is the O/S EQVOL denominator (§5.9); `0` in built-in-fallback mode. |
 
 **Functions:**
 
 | Function | Description |
 |----------|-------------|
-| `run(config, trackers, underlying_prices) -> Result<ProfileResult>` | Main orchestration. Discovers files, iterates days, enriches events, dispatches to trackers. |
+| `run(config, trackers, underlying_prices) -> Result<ProfileResult>` | Main orchestration. Discovers files, iterates days, enriches events, dispatches to trackers. When `os_ratio.enabled`, it ALSO accrues the DTE-banded per-day option trade volume and, after all files, appends the post-loop `OsRatio` aggregate report (§5.9). |
 | `price_or_nan(price_i64: i64) -> f64` | Converts i64 nanodollar price to f64 USD. Returns `NAN` for `SENTINEL_I64` or `<= 0`. Formula: `price_i64 as f64 / 1e9`. Inlined. |
 | `write_output(config, result) -> Result<()>` | Creates output directory, writes `{NN}_{TrackerName}.json` with `_provenance` object injected. |
 | `discover_files(config) -> Result<Vec<(String, PathBuf)>>` | Scans `data_dir` for files matching pattern with `{date}` placeholder. Extracts YYYYMMDD, filters by date range, sorts chronologically. |
-| `load_underlying_prices_from_equs(path) -> Result<Vec<DailyUnderlyingPrice>>` | Decodes EQUS OHLCV `.dbn.zst` (small, ~8 KB). Converts `OhlcvMsg` timestamps to dates via epoch-day arithmetic (`ts / 1e9 / 86400 + 719163` for CE day conversion). Converts nanodollar open/close to USD. |
+| `load_underlying_prices_from_equs(path) -> Result<Vec<DailyUnderlyingPrice>>` | Decodes EQUS OHLCV `.dbn.zst` (small, ~8 KB). Converts `OhlcvMsg` timestamps to dates via epoch-day arithmetic (`ts / 1e9 / 86400 + 719163` for CE day conversion). Extracts nanodollar open/close (→ USD) AND `OhlcvMsg.volume` (the O/S EQVOL denominator, §5.9). |
 
 **Event enrichment (inside run()):**
 
@@ -363,6 +378,52 @@ Key detail: `underlying_estimate = underlying_open` for the entire day (see D1 /
   "config": { "...full config..." }
 }
 ```
+
+---
+
+### src/diagnostics.rs
+
+Dispatch-loop diagnostic counters for the profiler, serialized into every output's `_provenance.diagnostics` block. Structure/contract only — the full field surface is enumerated in the §2 provenance JSON block and §9.
+
+**Constant:** `PROFILER_DIAGNOSTICS_SCHEMA_VERSION` (`&str`, see the constant in `diagnostics.rs`) — SemVer for the diagnostics JSON contract (MAJOR = field removed/reinterpreted, MINOR = additive optional field, PATCH = docs-only), aligned with the MBO `PRODUCER_DIAGNOSTICS_SCHEMA_VERSION` policy.
+
+**Types:**
+
+| Type | Role |
+|------|------|
+| `ProfileDiagnostics` | Terminal dispatch buckets: `total_decoded`, `unknown_instrument`, `dispatched`, `decode_errors`, and nested `observability`. `#[non_exhaustive]` + `#[serde(default)]` for forward-compat. |
+| `DispatchObservability` | OVERLAPPING sub-counters partitioning subsets of `dispatched` (`action_trade`/`action_quote`/`action_other`, `moneyness_fallback`, `bad_book_flagged`/`bad_ts_flagged`/`snapshot_flagged`) — observations, NOT filter gates (every counted event was still dispatched). |
+
+**Conservation law:** `conservation_check()` asserts `total_decoded == unknown_instrument + dispatched` (`decode_errors` are counted at the loader level and never enter the dispatch loop). Enforced by `debug_assert!` in `run()`.
+
+---
+
+### src/os_ratio.rs
+
+Option-to-stock volume ratio (O/S) — Johnson & So (2012), *Journal of Financial Economics* 106(2):262-286, Eq. 9; wiki `theory:option_to_stock_volume_ratio`. This is the module's **second output kind**: a pure post-loop day-level aggregate, NOT an `OptionsTracker` (see §5.9 for the architectural framing).
+
+**What it computes** (per trading day `d`):
+
+| Quantity | Definition |
+|----------|------------|
+| `O/S_d` | `OPVOL_d / (EQVOL_d / 100)` — DTE-banded option-contract trade volume over equity SHARE volume expressed in round lots of 100 (commensurate with the 100-share option multiplier). Stored as a dimensionless **fraction** (Johnson-So mean 4.34% = 0.0434; ×100 for a percent at display time only). |
+| `ΔO/S_d` | `(O/S_d − mean(prior `rolling_window_days` O/S)) / mean(...)` — the single-name daily-cadence analog of Johnson-So's prior-6-month deviation. Uses ONLY the strictly-prior window (no look-ahead, §9). Warmup days (`d < window`) emit `null`; `n_warmup_null = min(window, n_days)`. |
+
+**Function:** `compute_os_series(opvol_per_day, eqvol_per_day, rolling_window_days, dte_min, dte_max) -> serde_json::Value`. Pure (takes `(NaiveDate, u64)` pairs, no profiler/dbn types → golden-testable). Joins numerator↔denominator by date, sorts by date for window correctness + determinism, and returns the `OsRatio` report object. `dte_min`/`dte_max` are echoed into the report's `dte_band` for provenance (the `opvol_per_day` is already band-filtered by the caller in `run()`).
+
+**Sentinel policy (each recorded, never silently dropped — §8):**
+
+| Condition | `os_ratio` result |
+|-----------|-------------------|
+| `eqvol_d == 0` (fallback / open-close-only feed) | `null` |
+| `opvol_d == 0` (thin/empty band on a day) | `0.0` (FINITE — zero relative option activity, not missing) |
+| date in OPVOL but absent from EQVOL | `null` + increments `n_join_miss` (unreachable in the profiler path — `run()` hard-errors on a missing underlying, so EQVOL ⊇ OPVOL; reachable in unit tests) |
+
+**Report keys:** `tracker: "OsRatio"`, `n_days`, `rolling_window_days`, `dte_band`, `eqvol_round_lot_size`, `n_join_miss`, `per_day[]` (`date`/`opvol`/`eqvol_shares`/`eqvol_round_lots`/`os_ratio`/`delta_os`), `os_ratio_summary` + `delta_os_summary` (`mean`/`std`/`min`/`max`/`n_finite`; the delta summary also carries `n_warmup_null`), and a load-bearing `_caveats` string.
+
+**Embedded honesty caveats** (`_caveats`, per §13 discipline): **AD-OS-1** — Johnson-So's headline alpha is CROSS-SECTIONAL (a decile spread over ~1,700 firms); single-name is an UNESTABLISHED extrapolation, credible analog is ΔO/S with UNCALIBRATED magnitude. **AD-OS-2** — the profiled name may be the WEAKEST short-sale-cost + leverage tail (near-zero single-name edge). **AD-OS-4** — the 5-35-DTE band is the opposite end of the maturity spectrum from a 0DTE-dominated window. **No forward-IC claim** — this module emits the per-day instrument, not a measured IC (a short pilot leaves only `n_days − window` ΔO/S points, far below the §13 IC gate). `os_ratio_summary.n_finite == 0` signals the underlying volume was unavailable (fallback mode) — provide an EQUS `underlying_prices_file`.
+
+**Test coverage** (categories; run `cargo test` for the live count): the Eq. 9 fraction/round-lot golden, a worked ΔO/S series + warmup-boundary off-by-one, `opvol=0`→finite-zero, `eqvol=0`→null, join-miss recorded-not-dropped, determinism/date-sort byte-equality, `n_warmup_null` clamp, and a no-look-ahead invariant.
 
 ---
 
@@ -802,6 +863,18 @@ Constants: `SIZE_BUCKET_BOUNDS = [1, 5, 10, 50, 100]`, `N_SIZE_BUCKETS = 6`, `N_
 
 ---
 
+### 5.9 O/S Ratio — the non-tracker aggregate output
+
+The profiler has **two output kinds**. The 8 sections above are `OptionsTracker` implementations dispatched per-event through the trait. The O/S ratio is the **second kind**: a day-level aggregate that does NOT implement `OptionsTracker` and does NOT flow through the trait. Instead, `run()` accrues the DTE-banded per-day option trade volume inline in the dispatch loop, and — after all files — joins it with the per-day equity volume (`OhlcvMsg.volume`) and appends the report via `os_ratio::compute_os_series()` (§3 `src/os_ratio.rs`).
+
+- **Emission:** whenever `[os_ratio].enabled` (default `true`), the report lands as the last numbered file (e.g. `09_OsRatio.json` with the default tracker set — the numeric prefix is positional). It is fully absent from the output **only** when `enabled = false`.
+- **Fallback degradation:** on built-in-fallback / open-close-only underlying data (`volume == 0`) the report is still written but every `os_ratio`/`delta_os` is `null` (`os_ratio_summary.n_finite == 0`), with a loud `run()` warning. A runnable O/S requires a real EQUS `underlying_prices_file` (§2 "EQUS feed's dual role").
+- **Config:** `[os_ratio]` (`enabled`, `rolling_window_days`, `dte_min`, `dte_max`) — see §7.
+
+Formula, sentinels, report keys, and the embedded honesty caveats are documented in the §3 `src/os_ratio.rs` entry.
+
+---
+
 ## 6. hft-statistics API Surface
 
 The profiler imports these types from `hft-statistics`:
@@ -913,6 +986,16 @@ atm_range_pct = 0.02
 # Deep ITM/OTM boundary.
 # Default: 0.10 (10% from 1.0). Deep = ratio outside [0.90, 1.10].
 deep_range_pct = 0.10
+
+[os_ratio]
+# Option-to-stock volume ratio (Johnson & So 2012). Emits the NN_OsRatio.json
+# aggregate report (§5.9). The whole section is optional — omit it to accept
+# all defaults (O/S ENABLED). Requires an EQUS underlying_prices_file for a
+# non-null result (the fallback carries no equity volume → O/S is null).
+enabled = true            # Default: true. false → no OsRatio report at all.
+rolling_window_days = 6   # Default: 6. Trailing window (trading days) for the ΔO/S rolling-mean deviation.
+dte_min = 5               # Default: 5.  Inclusive lower DTE bound for the OPVOL numerator (JS footnote 9: the 5-35 band).
+dte_max = 35              # Default: 35. Inclusive upper DTE bound.
 ```
 
 **Note:** `reservoir_capacity` is a top-level field of `ProfilerConfig`, not part of `[buckets]`.
@@ -972,7 +1055,7 @@ The IV computation sampling interval (every Nth ATM quote) is configurable via t
 
 ### D9: Strict TOML parsing (deny_unknown_fields)
 
-All 5 config structs (`ProfilerConfig`, `InputConfig`, `TrackerConfig`, `OutputConfig`, `BucketConfig`) use `#[serde(deny_unknown_fields)]`. This rejects typos and misplaced keys at parse time with a clear error like `"unknown field reservoir_capacity, expected atm_range_pct or deep_range_pct"`. The motivation: a previous incarnation of the configs placed `reservoir_capacity` under `[buckets]` (incorrect — it is a top-level field), and serde silently ignored it. The bug was invisible because the configured value matched the default. Strict parsing eliminates this entire class of silent-misconfiguration bugs. Trade-off: introducing a new optional field in a future version becomes a "backward-incompatible" change for users with stricter older parsers — schema versioning may be added later if needed.
+Every config struct (`ProfilerConfig`, `InputConfig`, `TrackerConfig`, `OutputConfig`, `BucketConfig`, `OsRatioConfig`) uses `#[serde(deny_unknown_fields)]`. This rejects typos and misplaced keys at parse time with a clear error like `"unknown field reservoir_capacity, expected atm_range_pct or deep_range_pct"`. The motivation: a previous incarnation of the configs placed `reservoir_capacity` under `[buckets]` (incorrect — it is a top-level field), and serde silently ignored it. The bug was invisible because the configured value matched the default. Strict parsing eliminates this entire class of silent-misconfiguration bugs. Trade-off: introducing a new optional field in a future version becomes a "backward-incompatible" change for users with stricter older parsers — schema versioning may be added later if needed.
 
 ### D10: NVDA-only fallback safety constraint
 
@@ -1035,6 +1118,7 @@ output_opra_nvda/
     06_GreeksTracker.json
     07_PutCallRatioTracker.json
     08_OptionsEffectiveSpreadTracker.json
+    09_OsRatio.json            # non-tracker aggregate, when [os_ratio].enabled (§5.9)
 ```
 
-Each JSON file contains the tracker's report object plus an injected `_provenance` object with full config, runtime stats, and version.
+Each per-tracker JSON contains the tracker's report object plus an injected `_provenance` object with full config, runtime stats, and version; the trailing `NN_OsRatio.json` (the non-tracker O/S aggregate, §5.9) carries the same `_provenance`.

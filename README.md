@@ -37,6 +37,7 @@ High-performance Rust profiler for OPRA options microstructure analysis. Process
 3. **ContractRouter** parses OCC symbols into `ContractInfo` (strike, expiration, call/put), classifies moneyness, computes DTE, and enriches each record into an `OptionsEvent`.
 4. All enabled **trackers** receive every enriched event in a single pass -- no re-reads.
 5. After all files are processed, each tracker produces a **JSON report** with a `_provenance` block.
+6. **Second output path (O/S ratio, not a tracker).** In parallel with tracker dispatch, when `[os_ratio].enabled` (default) the loop accrues the DTE-banded per-day option trade volume; after all files the profiler joins it with the EQUS daily equity volume and emits a non-tracker `OsRatio` aggregate report (appended last). See [Configuration Reference → `[os_ratio]`](#os_ratio----option-to-stock-volume-ratio) and [Output Format](#output-format).
 
 ### Single-Pass Composable Tracker Pattern
 
@@ -80,6 +81,8 @@ The profiler has no dependency on `mbo-lob-reconstructor` or `mbo-statistical-pr
 | 6 | **GreeksTracker** | Implied volatility via BSM Newton-Raphson solver (Brenner-Subrahmanyam 1988 initial guess). IV by DTE bucket, 390-bin intraday IV curve for 0DTE ATM contracts (both calls and puts contribute). Delta, gamma, vega distributions for 0DTE ATM. IV sampled every 100th ATM quote for throughput |
 | 7 | **PutCallRatioTracker** | Daily put-call ratio by volume and by trade count. Separate 0DTE PCR. 390-bin intraday PCR curves (all options and 0DTE-only), computed from separate call/put volume accumulators |
 | 8 | **OptionsEffectiveSpreadTracker** | Effective spread (2 x |trade_price - mid|) vs quoted spread. Trade-through rate (fraction outside BBO). Effective spread by 6 size buckets (1, 2-5, 6-10, 11-50, 51-100, 100+), by DTE bucket (4), and by moneyness (5). 390-bin intraday effective spread curve for 0DTE ATM |
+
+> **Beyond the trackers: the O/S-ratio aggregate.** In addition to the per-tracker profiles above, the profiler emits one more report that is **NOT** an `OptionsTracker` — the option-to-stock volume ratio (O/S; Johnson & So 2012). It is a post-loop day-level aggregate (per-day option volume ÷ equity volume, plus its ΔO/S deviation) written as a trailing `NN_OsRatio.json`. It is enabled by default and requires an EQUS `underlying_prices_file` for a non-null result. See [Configuration Reference → `[os_ratio]`](#os_ratio----option-to-stock-volume-ratio) and [Output Format](#output-format).
 
 ## Build Prerequisites
 
@@ -126,7 +129,7 @@ Configuration is TOML-driven. All sections except `[input]` have defaults and ca
 | `data_dir` | path | (required) | Directory containing OPRA `.dbn.zst` files |
 | `filename_pattern` | string | (required) | Filename pattern with `{date}` placeholder, e.g. `"opra-pillar-{date}.cmbp-1.dbn.zst"` |
 | `symbol` | string | `"NVDA"` | Underlying symbol for contract filtering |
-| `underlying_prices_file` | path | (none) | Path to EQUS OHLCV `.dbn.zst` for underlying open/close prices |
+| `underlying_prices_file` | path | (none) | Path to EQUS OHLCV `.dbn.zst`. **Dual role:** supplies the underlying open/close (moneyness + BSM Greeks) AND the daily equity SHARE volume (`OhlcvMsg.volume`) — the O/S-ratio denominator. The built-in fallback carries open/close only, so O/S is null without this file (see [`[os_ratio]`](#os_ratio----option-to-stock-volume-ratio)) |
 | `risk_free_rate` | f64 | `0.05` | Annualized risk-free rate for BSM calculations |
 | `date_start` | string | (none) | Optional inclusive start date filter (`YYYY-MM-DD`) |
 | `date_end` | string | (none) | Optional inclusive end date filter (`YYYY-MM-DD`) |
@@ -157,6 +160,17 @@ Configuration is TOML-driven. All sections except `[input]` have defaults and ca
 |-------|------|---------|-------------|
 | `atm_range_pct` | f64 | `0.02` | ATM range as fraction of underlying price (+/- 2%) |
 | `deep_range_pct` | f64 | `0.10` | Deep ITM/OTM boundary (10% from ATM) |
+
+### `[os_ratio]` -- Option-to-Stock Volume Ratio
+
+Option-to-stock volume ratio (O/S; Johnson & So 2012). Emits the non-tracker `NN_OsRatio.json` aggregate. The whole section is optional — omit it to accept all defaults (O/S **enabled**). A non-null O/S requires an EQUS `underlying_prices_file` (the fallback carries no equity volume).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Compute and emit the O/S report. `false` → no `OsRatio` report at all |
+| `rolling_window_days` | usize | `6` | Trailing window (trading days) for the ΔO/S rolling-mean deviation |
+| `dte_min` | i64 | `5` | Inclusive lower DTE bound for the OPVOL numerator (Johnson-So footnote 9: the 5-35 band) |
+| `dte_max` | i64 | `35` | Inclusive upper DTE bound |
 
 ### Top-Level
 
@@ -209,9 +223,12 @@ output_opra_nvda/
     06_GreeksTracker.json
     07_PutCallRatioTracker.json
     08_OptionsEffectiveSpreadTracker.json
+    09_OsRatio.json            # non-tracker O/S aggregate, when [os_ratio].enabled
 ```
 
-File numbering corresponds to tracker registration order. Every JSON file includes a `_provenance` block containing:
+File numbering corresponds to registration order (positional). When `[os_ratio].enabled` (the default), a trailing `NN_OsRatio.json` is appended **after** the tracker reports — the non-tracker O/S aggregate (per-day `os_ratio`/`delta_os` series + `os_ratio_summary`/`delta_os_summary`, and a load-bearing `_caveats` string documenting the Johnson-So single-name caveats and the no-forward-IC scope). On built-in-fallback / open-close-only underlying data the file is still written but every O/S value is `null` (`os_ratio_summary.n_finite == 0`) with a warning; provide an EQUS `underlying_prices_file` for a runnable O/S. The report is absent only when `enabled = false`.
+
+Every JSON file includes a `_provenance` block containing:
 
 ```json
 {
@@ -342,7 +359,9 @@ src/
     contract.rs             -- OCC symbol parser, ContractInfo, ContractMap
     event.rs                -- OptionsEvent, DayContext, Action, Side
     loader.rs               -- Cmbp1Loader (.dbn.zst streaming reader)
+    diagnostics.rs          -- Dispatch-loop counters + conservation law (_provenance.diagnostics)
     profiler.rs             -- Single-pass profiling engine, file discovery, output writer
+    os_ratio.rs             -- O/S volume ratio (Johnson-So 2012): non-tracker post-loop aggregate
     report_utils.rs         -- Shared DTE/moneyness bucketing, curve finalization
     test_helpers.rs         -- Shared test fixtures (cfg(test) only)
     options_math/
