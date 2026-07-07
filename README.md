@@ -2,15 +2,15 @@
 
 High-performance Rust profiler for OPRA options microstructure analysis. Processes raw OPRA CMBP-1 `.dbn.zst` files in a single pass through composable analysis trackers, producing JSON statistical profiles with full provenance.
 
-> **Pipeline scope (2026-06-02).** This module is part of an **intraday trading research pipeline** — an experiment-first platform for discovering and validating *any* profitable **intraday** trading edge (no overnight positions), across approach classes (microstructure/HFT, scalping, intraday momentum, intraday statistical arbitrage, …) and instruments (equities, futures, same-day options). The pipeline *originated* as a high-frequency NVDA MBO/LOB microstructure system — that origin explains the "HFT" / "LOB" / "MBO" naming here — and that microstructure-direction program is now one (largely-closed) track among many. **Names are historical; the mission is general.** This module's role: a Rust OPRA options-data profiler — 8 trackers incl. BSM Greeks/IV, moneyness, premium decay (4.1M evt/s); the options-analytics surface (directly relevant to the same-day-options approach class). For the full mission + approach taxonomy + capability-readiness boundary, see root `CLAUDE.md` §Research Scope & Charter (+ `CROSS_ASSET_OFI_FINDINGS_AND_ISSUES_2026_06_01.md` §9).
+> **Pipeline scope (2026-06-02).** This module is part of an **intraday trading research pipeline** — an experiment-first platform for discovering and validating *any* profitable **intraday** trading edge (no overnight positions), across approach classes (microstructure/HFT, scalping, intraday momentum, intraday statistical arbitrage, …) and instruments (equities, futures, same-day options). The pipeline *originated* as a high-frequency NVDA MBO/LOB microstructure system — that origin explains the "HFT" / "LOB" / "MBO" naming here — and that microstructure-direction program is now one (largely-closed) track among many. **Names are historical; the mission is general.** This module's role: a Rust OPRA options-data profiler — 8 trackers incl. BSM Greeks/IV, moneyness, premium decay (multi-million evt/s single-pass); the options-analytics surface (directly relevant to the same-day-options approach class). For the full mission + approach taxonomy + capability-readiness boundary, see root `CLAUDE.md` §Research Scope & Charter (+ `CROSS_ASSET_OFI_FINDINGS_AND_ISSUES_2026_06_01.md` §9).
 
 ## Performance
 
 | Metric | Value |
 |--------|-------|
-| Throughput | 4.1 million events/sec (release mode, single-threaded) |
-| Dataset | 10.28 billion events across 8 trading days |
-| Runtime | 42 minutes (Apple Silicon, NVMe SSD) |
+| Throughput | multi-million events/sec (release mode, single-threaded) — the per-run value is recorded in every output JSON's `_provenance.throughput_events_per_sec`; do not hand-copy it here (hft-rules §11) |
+| Dataset | 10.28 billion events across 8 trading days (NVDA OPRA, Nov 2025 reference run) |
+| Runtime | tens of minutes for the 8-day dataset (Apple Silicon, NVMe SSD) — per-run value in `_provenance.runtime_secs` |
 | Bottleneck | zstd decompression (single-threaded per file stream) |
 | I/O buffer | 1 MB per file (optimized for modern SSDs) |
 
@@ -65,7 +65,7 @@ Statistical primitives are shared via the [`hft-statistics`](https://github.com/
 - **WelfordAccumulator** -- online mean/variance (Welford 1962)
 - **StreamingDistribution** -- quantile estimation via reservoir sampling
 - **IntradayCurveAccumulator** -- 390-bin per-minute intraday aggregation (RTH 09:30-16:00 ET)
-- **utc_offset_for_date / day_epoch_ns** -- DST-aware time utilities
+- **utc_offset_for_date / midnight_utc_ns** -- DST-aware time utilities (the 4-arg `day_epoch_ns()` predecessor is `#[deprecated]` at the pinned v0.2.1; the profiler migrated to `midnight_utc_ns()` in commit `25e3a38`)
 
 The profiler has no dependency on `mbo-lob-reconstructor` or `mbo-statistical-profiler`.
 
@@ -86,11 +86,13 @@ The profiler has no dependency on `mbo-lob-reconstructor` or `mbo-statistical-pr
 
 ## Build Prerequisites
 
-- **Rust 1.82+** (edition 2021)
-- **hft-statistics** -- fetched automatically from GitHub: `https://github.com/nagarx/hft-statistics.git` (pinned to commit `e976ff7`)
+- **Rust 1.82+** (edition 2021; MSRV per `Cargo.toml` `rust-version`, enforced in CI). The working toolchain is pinned to **1.94.0** via `rust-toolchain.toml` (#PY-220, coordinated across the monorepo's Rust crates).
+- **hft-statistics** -- fetched automatically from GitHub: `https://github.com/nagarx/hft-statistics.git` (pinned to tag `v0.2.1`)
 - **dbn v0.20.0** -- fetched automatically from GitHub: `https://github.com/databento/dbn.git` (tag `v0.20.0`)
 
 No other external system dependencies required. All crate dependencies are resolved by Cargo.
+
+CI (`.github/workflows/ci.yml`) gates every push/PR: `cargo fmt --check`, `clippy -D warnings`, `cargo test`, `cargo doc` with `RUSTDOCFLAGS=-D warnings`, and an MSRV-1.82 `cargo check`.
 
 ## Quick Start
 
@@ -234,25 +236,29 @@ Every JSON file includes a `_provenance` block containing:
 {
   "_provenance": {
     "profiler_version": "0.1.0",
+    "output_schema_version": "2.1.0",
     "symbol": "NVDA",
     "dataset": "OPRA.PILLAR",
     "schema": "cmbp-1",
     "n_days": 8,
     "total_events": 10280000000,
-    "runtime_secs": 2520.0,
-    "throughput_events_per_sec": 4079365.0,
+    "runtime_secs": 2100.0,
+    "throughput_events_per_sec": 4900000.0,
+    "diagnostics_schema_version": "1.0.0",
+    "diagnostics": { "...dispatch-loop counters + observability sub-counters..." },
+    "conservation_check": true,
     "config": { ... }
   }
 }
 ```
 
-The `config` field embeds the full TOML configuration used for the run, enabling exact reproduction.
+Run-dependent values above (`n_days`, `total_events`, `runtime_secs`, `throughput_events_per_sec`) are illustrative — each run records its own. `output_schema_version` tracks the `OUTPUT_SCHEMA_VERSION` constant in `profiler.rs` and `diagnostics_schema_version` tracks `PROFILER_DIAGNOSTICS_SCHEMA_VERSION` in `diagnostics.rs` (both SemVer'd; verify against the constants, not this snippet). The `config` field embeds the full TOML configuration used for the run, enabling exact reproduction.
 
 ## Dependencies
 
 | Crate | Version / Source | Purpose |
 |-------|-----------------|---------|
-| `hft-statistics` | git: `github.com/nagarx/hft-statistics.git` (rev `e976ff7`) | Statistical primitives: Welford, StreamingDistribution, IntradayCurveAccumulator, DST-aware time |
+| `hft-statistics` | git: `github.com/nagarx/hft-statistics.git` (tag `v0.2.1`) | Statistical primitives: Welford, StreamingDistribution, IntradayCurveAccumulator, DST-aware time |
 | `dbn` | git: `github.com/databento/dbn.git` (v0.20.0) | CMBP-1 `.dbn.zst` decoding, `CbboMsg` record type, metadata/symbology |
 | `ahash` | 0.8 | High-performance hashing for contract maps and unique-contract sets |
 | `serde` | 1.0 (with `derive`) | Serialization/deserialization for config and report types |
@@ -278,23 +284,30 @@ Fat LTO and single codegen unit maximize throughput for the streaming event loop
 
 ## Test Coverage
 
-84 unit tests + 1 ignored across 13 source files. The ignored test is the F-013 / FIND-UFO contract-lock (intraday underlying-price reflection) — pending Axis L decision on the underlying-feed merge architecture.
+Unit tests are inline (`#[cfg(test)]`) alongside each module — run `cargo test` for the live count (per-module counts are deliberately not hand-maintained here, per hft-rules §11). Two tests are `#[ignore]`d by design:
 
-| Module | Tests | Coverage |
-|--------|-------|----------|
-| OCC symbol parsing (`contract.rs`) | 12 | Standard symbols, edge cases (6-char roots, penny strikes, leap year expiries), malformed input |
-| BSM pricing + IV (`options_math/bsm.rs`) | 18 | Call/put pricing, IV Newton-Raphson convergence, Greeks (delta, gamma, vega), edge cases (deep ITM/OTM, near-expiry, zero time). (Theta + rho not implemented; theta deleted 2026-05-08 F-017 cleanup pending time-system unit alignment.) |
-| BBO accessors (`event.rs`) | 6 + 1 ignored | F-NEW-R5-1 boundary-predicate consistency: normal/locked/crossed/NaN-bid/NaN-ask invariants across `option_mid` / `spread` / `spread_pct` / `has_valid_bbo` + parametric cross-accessor finiteness lock. 1 ignored F-013 contract-lock test pending Axis L. |
-| Moneyness classification (`options_math/moneyness.rs`) | 11 | ATM/ITM/OTM/Deep boundaries for calls and puts, edge cases at bucket boundaries |
-| Report utilities (`report_utils.rs`) | 4 | DTE bucketing, moneyness indexing, curve finalization |
-| QualityTracker | 4 | Event counting, quote/trade classification, DTE distribution, multi-day aggregation |
-| SpreadTracker | 4 | Spread computation, DTE/moneyness bucketing, intraday curve population, reservoir sampling |
-| ZeroDteTracker | 4 | ATM 0DTE filtering, spread/premium/volume curves, bid-ask imbalance |
-| PremiumDecayTracker | 3 | Decay measurement, premium-to-spread ratio, multi-day statistics |
-| VolumeTracker | 4 | Volume accounting, DTE/moneyness bucketing, call/put split, daily statistics |
-| GreeksTracker | 4 | IV computation, sampling gate, delta/gamma/vega extraction, DTE bucket IV |
-| PutCallRatioTracker | 4 | Daily PCR, intraday PCR curves, 0DTE-specific PCR, multi-day Welford |
-| OptionsEffectiveSpreadTracker | 6 | Effective spread formula, trade-through detection, size bucketing, DTE/moneyness cross, intraday curve |
+- `event.rs::tests::test_intraday_underlying_reflected_in_event_underlying_price` — the F-013 / FIND-UFO contract-lock for the FULL intraday-underlying fix (blocked on Axis L; the shipped open→close interpolation is a partial fix — see Design Decisions below).
+- `profiler.rs::tests::test_equs_volume_offramp_wired_on_real_data` — integration check that the O/S equity-volume denominator off-ramp is wired against the real (large, gitignored) EQUS file; run on demand with `cargo test -- --ignored`.
+
+| Module | Coverage |
+|--------|----------|
+| OCC symbol parsing (`contract.rs`) | Standard symbols, edge cases (6-char roots, penny strikes, leap year expiries), malformed input |
+| BSM pricing + IV (`options_math/bsm.rs`) | Call/put pricing, IV Newton-Raphson convergence, Greeks (delta, gamma, vega), edge cases (deep ITM/OTM, near-expiry, zero time). (Theta + rho not implemented; theta deleted 2026-05-08 F-017 cleanup pending time-system unit alignment.) |
+| BBO accessors (`event.rs`) | F-NEW-R5-1 boundary-predicate consistency: normal/locked/crossed/NaN-bid/NaN-ask invariants across `option_mid` / `spread` / `spread_pct` / `has_valid_bbo` + parametric cross-accessor finiteness lock. Plus the ignored F-013 contract-lock test (pending Axis L). |
+| Moneyness classification (`options_math/moneyness.rs`) | ATM/ITM/OTM/Deep boundaries for calls and puts, edge cases at bucket boundaries |
+| Report utilities (`report_utils.rs`) | DTE bucketing, moneyness indexing, curve finalization |
+| Config parsing (`config.rs`) | `[os_ratio]` section defaults + strict parsing, incl. the serde-default-`true` backward-compat lock for configs written before the section existed |
+| Diagnostics (`diagnostics.rs`) | Conservation law valid/violated, serde roundtrip, forward-compat partial JSON, zero default, action sub-counter partition of `dispatched` |
+| O/S ratio (`os_ratio.rs`) | Johnson-So Eq. 9 fraction/round-lot golden, ΔO/S series + warmup boundary, sentinel policy (`eqvol=0`→null vs `opvol=0`→finite zero), join-miss recorded-not-dropped, determinism/date-sort, no-look-ahead invariant |
+| Profiler engine (`profiler.rs`) | The ignored-by-default real-EQUS integration test (O/S denominator off-ramp) |
+| QualityTracker | Event counting, quote/trade classification, DTE distribution, multi-day aggregation |
+| SpreadTracker | Spread computation, DTE/moneyness bucketing, intraday curve population, reservoir sampling |
+| ZeroDteTracker | ATM 0DTE filtering, spread/premium/volume curves, bid-ask imbalance |
+| PremiumDecayTracker | Decay measurement, premium-to-spread ratio, multi-day statistics |
+| VolumeTracker | Volume accounting, DTE/moneyness bucketing, call/put split, daily statistics |
+| GreeksTracker | IV computation, sampling gate (incl. per-day reset), signed call/put delta + gamma/vega extraction, DTE bucket IV |
+| PutCallRatioTracker | Daily PCR, intraday PCR curves, 0DTE-specific PCR, multi-day Welford |
+| OptionsEffectiveSpreadTracker | Effective spread formula, trade-through detection, size bucketing, DTE/moneyness cross, intraday curve |
 
 Run tests:
 
@@ -304,11 +317,11 @@ cargo test
 
 ## Design Decisions and Known Limitations
 
-### Underlying Price Frozen at Day Open (F-013 / FIND-UFO — fix pending Axis L)
+### Underlying Price Interpolated Open→Close (F-013 / FIND-UFO — partial fix shipped; full fix pending Axis L)
 
-OPRA data contains only options quotes and trades -- it does not include equity market quotes. The profiler currently uses the underlying stock's opening price (from EQUS OHLCV or built-in fallback) as the underlying estimate for the entire trading day (`profiler.rs:111` — `let underlying_estimate = underlying_open;`). This means moneyness classification and BSM Greek computation use a static underlying price that does not track intraday equity moves.
+OPRA data contains only options quotes and trades -- it does not include equity market quotes. Since the FIND-UFO partial fix (commit `5eb31cc`, 2026-05-27), the profiler estimates the underlying **per event** by linearly interpolating between the day's open and close (from EQUS OHLCV or the built-in fallback): pre-market events use the open, post-market events use the close, and RTH events use `open + progress × (close − open)` where `progress` is the fraction of the 09:30–16:00 ET session elapsed (see the "FIND-UFO partial fix" block in `profiler.rs`). This captures the day's directional drift (e.g., $194→$183 on an earnings day) instead of freezing at the open — but it is still an approximation: the intraday **path** is invisible, so moneyness classification and the BSM S input miss intra-session swings that reverse by the close, and the estimate is exact only at the open/close anchors.
 
-This is tracked as F-013 / FIND-UFO in the OPRA investigation (see `opra_investigation/01_audit_architecture_data_flow.md` and `HANDOFF_FOR_DESIGN_AND_IMPLEMENTATION.md` §4). The post-fix contract is locked by an `#[ignore]`-gated regression test (`event.rs::tests::test_intraday_underlying_reflected_in_event_underlying_price`) that documents what the future fix must satisfy. Fix requires deciding Axis L (L.1 EQUS-embed / L.2 pre-pass / L.3 k-way merge / L.4 60s snapshot / L.5 forward-fill) — out of scope for the 2026-05-08 Phase 1 surgical-fix cycle.
+The full fix is tracked as F-013 / FIND-UFO in the OPRA investigation (see `opra_investigation/01_audit_architecture_data_flow.md` and `HANDOFF_FOR_DESIGN_AND_IMPLEMENTATION.md` §4) and requires a true intraday underlying feed — deciding Axis L (L.1 EQUS-embed / L.2 pre-pass / L.3 k-way merge / L.4 60s snapshot / L.5 forward-fill). The full-fix contract is locked by an `#[ignore]`-gated regression test (`event.rs::tests::test_intraday_underlying_reflected_in_event_underlying_price`). Note: that test's inline comments (and the synthetic `test_helpers` fixtures it uses) still describe the pre-interpolation frozen-at-open state — they predate the 5eb31cc partial fix and remain authoritative only for the FULL-fix contract they lock, not for current `profiler.rs` behavior.
 
 ### Time-to-Expiry Convention
 
@@ -334,7 +347,7 @@ The `process_event` method on the `OptionsTracker` trait accepts a `regime: u8` 
 
 ### IV Sampling Interval
 
-The `GreeksTracker` computes implied volatility via Newton-Raphson for every 100th qualifying ATM quote (the default sample interval). At 4.1M events/sec with thousands of ATM quotes per second, computing IV for every quote would be a throughput bottleneck with negligible statistical benefit. The interval is configurable via the `GreeksTracker::with_sample_interval(rate, capacity, interval)` constructor for use cases that need higher IV resolution.
+The `GreeksTracker` computes implied volatility via Newton-Raphson for every 100th qualifying ATM quote (the default sample interval). At multi-million events/sec with thousands of ATM quotes per second, computing IV for every quote would be a throughput bottleneck with negligible statistical benefit. The interval is configurable via the `GreeksTracker::with_sample_interval(rate, capacity, interval)` constructor for use cases that need higher IV resolution.
 
 ### Moneyness Classification
 

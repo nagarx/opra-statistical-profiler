@@ -2,7 +2,7 @@
 
 Deep technical reference for the `opra-statistical-profiler` Rust crate. Covers architecture, every module, all formulas, configuration, and design decisions.
 
-> **Pipeline scope (2026-06-02).** This module is part of an **intraday trading research pipeline** — an experiment-first platform for discovering and validating *any* profitable **intraday** trading edge (no overnight positions), across approach classes (microstructure/HFT, scalping, intraday momentum, intraday statistical arbitrage, …) and instruments (equities, futures, same-day options). The pipeline *originated* as a high-frequency NVDA MBO/LOB microstructure system — that origin explains the "HFT" / "LOB" / "MBO" naming here — and that microstructure-direction program is now one (largely-closed) track among many. **Names are historical; the mission is general.** This module's role: a Rust OPRA options-data profiler — 8 trackers incl. BSM Greeks/IV, moneyness, premium decay (4.1M evt/s); the options-analytics surface (directly relevant to the same-day-options approach class). For the full mission + approach taxonomy + capability-readiness boundary, see root `CLAUDE.md` §Research Scope & Charter (+ `CROSS_ASSET_OFI_FINDINGS_AND_ISSUES_2026_06_01.md` §9).
+> **Pipeline scope (2026-06-02).** This module is part of an **intraday trading research pipeline** — an experiment-first platform for discovering and validating *any* profitable **intraday** trading edge (no overnight positions), across approach classes (microstructure/HFT, scalping, intraday momentum, intraday statistical arbitrage, …) and instruments (equities, futures, same-day options). The pipeline *originated* as a high-frequency NVDA MBO/LOB microstructure system — that origin explains the "HFT" / "LOB" / "MBO" naming here — and that microstructure-direction program is now one (largely-closed) track among many. **Names are historical; the mission is general.** This module's role: a Rust OPRA options-data profiler — 8 trackers incl. BSM Greeks/IV, moneyness, premium decay (multi-million evt/s single-pass); the options-analytics surface (directly relevant to the same-day-options approach class). For the full mission + approach taxonomy + capability-readiness boundary, see root `CLAUDE.md` §Research Scope & Charter (+ `CROSS_ASSET_OFI_FINDINGS_AND_ISSUES_2026_06_01.md` §9).
 
 ---
 
@@ -12,17 +12,18 @@ High-performance statistical profiler for OPRA options microstructure analysis. 
 
 | Property | Value |
 |----------|-------|
-| Language | Rust (edition 2021, MSRV 1.82) |
+| Language | Rust (edition 2021, MSRV 1.82; toolchain pinned to 1.94.0 via `rust-toolchain.toml`, #PY-220) |
 | Trackers | 8 |
-| Tests | 91 passed + 1 ignored (FIND-UFO contract-lock, blocked on Axis L) |
-| Source LOC | ~4,550 (22 files including binary + diagnostics.rs) |
-| Throughput | ~4.1M events/sec |
+| Tests | run `cargo test` for the live count. Two `#[ignore]`d by design: the F-013/FIND-UFO contract-lock (`event.rs`, blocked on Axis L) + the real-EQUS O/S off-ramp integration test (`profiler.rs`, run with `--ignored`) |
+| Source LOC | run `find src -name '*.rs' \| xargs wc -l` for the live count |
+| Throughput | multi-million events/sec — per-run value recorded in every output's `_provenance.throughput_events_per_sec` |
+| CI | `.github/workflows/ci.yml`: `fmt --check` / `clippy -D warnings` / `test` / `doc` with `RUSTDOCFLAGS=-D warnings` / MSRV-1.82 check |
 | Architecture | Single-pass composable tracker dispatch |
 | Input | OPRA CMBP-1 `.dbn.zst` (consolidated BBO + trades) + EQUS OHLCV `.dbn.zst` (underlying open/close **and** the O/S equity-volume denominator) |
 | Output | Numbered JSON files with `_provenance` metadata — **two kinds**: one per-tracker profile per enabled tracker, plus a post-loop O/S-ratio aggregate report (§5.9) |
 
 **Dependencies:**
-- `hft-statistics` (git, github.com/nagarx/hft-statistics.git, pinned to rev `e976ff7`) -- Welford, streaming distribution, intraday curve accumulator, DST-aware time utilities
+- `hft-statistics` (git, github.com/nagarx/hft-statistics.git, pinned to tag `v0.2.1`) -- Welford, streaming distribution, intraday curve accumulator, DST-aware time utilities
 - `dbn` v0.20.0 (git, github.com/databento/dbn.git) -- Databento binary format decoder
 - `ahash` 0.8 -- Fast hashing for contract maps and unique contract sets
 - `serde` + `serde_json` + `toml` -- Serialization, JSON output, TOML config
@@ -102,12 +103,12 @@ write_output():
 **Day processing lifecycle:**
 
 1. Parse date from filename (YYYYMMDD via `{date}` placeholder in pattern)
-2. Compute `utc_offset` and `day_epoch_ns` via `hft_statistics::time::regime`
+2. Compute `utc_offset` (via `utc_offset_for_date`) and the day's midnight-UTC epoch (via `midnight_utc_ns`) from `hft_statistics::time::regime`
 3. Look up underlying open/close from EQUS prices (or fallback)
 4. Build `DayContext`, call `begin_day()` on all trackers
 5. Open `.dbn.zst`, build `ContractMap` from metadata symbology
-6. Set `underlying_estimate = underlying_open` (static for entire day -- see D1)
-7. Iterate all `CbboMsg` records, enrich into `OptionsEvent`, dispatch (and, when `os_ratio.enabled`, accrue the DTE-banded per-day option trade volume for the O/S numerator)
+6. Precompute the RTH open/close boundaries used for per-event `underlying_estimate` interpolation between `underlying_open` and `underlying_close` (FIND-UFO partial fix -- see D1)
+7. Iterate all `CbboMsg` records, enrich into `OptionsEvent` (incl. the interpolated per-event `underlying_estimate`), dispatch (and, when `os_ratio.enabled`, accrue the DTE-banded per-day option trade volume for the O/S numerator)
 8. Call `end_of_day()`, `reset_day()` on all trackers
 9. Repeat for next file
 
@@ -123,7 +124,7 @@ After all days: when `os_ratio.enabled`, join the per-day OPVOL with the per-day
 
 ## 3. Module Reference
 
-### src/lib.rs (79 lines)
+### src/lib.rs
 
 Crate root. Declares public modules and the `OptionsTracker` trait.
 
@@ -140,7 +141,7 @@ Crate root. Declares public modules and the `OptionsTracker` trait.
 
 ---
 
-### src/config.rs (153 lines)
+### src/config.rs
 
 TOML-driven profiler configuration. All fields have defaults except `input.data_dir` and `input.filename_pattern`.
 
@@ -177,7 +178,7 @@ Every config struct (the `ProfilerConfig` field types above) uses `#[serde(deny_
 
 ---
 
-### src/contract.rs (257 lines, 12 tests)
+### src/contract.rs
 
 OCC option symbol parser and contract metadata management.
 
@@ -228,7 +229,7 @@ chars, padded)
 
 ---
 
-### src/event.rs (141 lines)
+### src/event.rs
 
 Enriched options event type and day-level context.
 
@@ -286,7 +287,7 @@ Enriched options event type and day-level context.
 
 ---
 
-### src/loader.rs (87 lines)
+### src/loader.rs
 
 Streaming loader for OPRA CMBP-1 `.dbn.zst` files.
 
@@ -311,7 +312,7 @@ Opens the `.dbn.zst` file with 1 MB buffered reader, creates a `DynDecoder` with
 
 ---
 
-### src/profiler.rs (~460 lines)
+### src/profiler.rs
 
 Single-pass profiling engine. Orchestrates file discovery, day processing, event enrichment, tracker dispatch, and diagnostic accounting.
 
@@ -343,14 +344,14 @@ Single-pass profiling engine. Orchestrates file discovery, day processing, event
 
 The dispatch loop reads ALL 19 non-reserved CbboMsg fields (Phase 2A-1), increments `ProfileDiagnostics` counters at every decision point (Phase 2A-2), and computes `time_regime()` from `hft_statistics` (Phase 2A-4). Every record is accounted for via the conservation law: `total_decoded == unknown_instrument + dispatched`.
 
-Key detail: `underlying_estimate = underlying_open` for the entire day (see D1 / FIND-UFO).
+Key detail: `underlying_estimate` is computed **per event** by linear open→close interpolation on RTH session progress (pre-market events → `underlying_open`; post-market → `underlying_close`; RTH → `open + progress × (close − open)`). This is the FIND-UFO partial fix (commit `5eb31cc`); the intraday path remains invisible — see D1.
 
 **Provenance object (injected into every JSON output):**
 
 ```json
 {
   "profiler_version": "0.1.0",
-  "output_schema_version": "2.0.0",
+  "output_schema_version": "2.1.0",
   "symbol": "NVDA",
   "dataset": "OPRA.PILLAR",
   "schema": "cmbp-1",
@@ -378,6 +379,8 @@ Key detail: `underlying_estimate = underlying_open` for the entire day (see D1 /
   "config": { "...full config..." }
 }
 ```
+
+Counter/runtime values above are illustrative (each run records its own). The two schema-version fields track code constants — `OUTPUT_SCHEMA_VERSION` in `profiler.rs` and `PROFILER_DIAGNOSTICS_SCHEMA_VERSION` in `diagnostics.rs` — verify against the constants, not this snippet.
 
 ---
 
@@ -427,7 +430,7 @@ Option-to-stock volume ratio (O/S) — Johnson & So (2012), *Journal of Financia
 
 ---
 
-### src/report_utils.rs (103 lines, 4 tests)
+### src/report_utils.rs
 
 Shared constants and utilities for DTE bucketing, moneyness indexing, and intraday curve finalization.
 
@@ -448,7 +451,7 @@ Shared constants and utilities for DTE bucketing, moneyness indexing, and intrad
 
 ---
 
-### src/test_helpers.rs (102 lines, test-only)
+### src/test_helpers.rs (test-only)
 
 Factory functions for constructing synthetic `OptionsEvent` instances in tests. Only compiled under `#[cfg(test)]`.
 
@@ -472,7 +475,7 @@ Factory functions for constructing synthetic `OptionsEvent` instances in tests. 
 
 ---
 
-### src/bin/profile_opra.rs (142 lines)
+### src/bin/profile_opra.rs
 
 CLI binary entry point.
 
@@ -494,7 +497,7 @@ CLI binary entry point.
 
 ## 4. Options Math
 
-### BSM (src/options_math/bsm.rs, 438 lines, 19 tests)
+### BSM (src/options_math/bsm.rs)
 
 Black-Scholes-Merton European option pricing, implied volatility solver, and Greek computation.
 
@@ -566,7 +569,7 @@ Clamped to `[0.10, MAX_IV]` initially. Each iteration: `sigma -= (price(sigma) -
 
 ---
 
-### Moneyness (src/options_math/moneyness.rs, 220 lines, 11 tests)
+### Moneyness (src/options_math/moneyness.rs)
 
 5-class moneyness classification based on strike-to-underlying ratio.
 
@@ -614,7 +617,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 
 ---
 
-### 5.1 QualityTracker (src/trackers/quality.rs, 229 lines, 4 tests)
+### 5.1 QualityTracker (src/trackers/quality.rs)
 
 **Purpose:** Data quality and event count statistics. Entry-level validation of the OPRA data feed.
 
@@ -640,7 +643,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 
 ---
 
-### 5.2 SpreadTracker (src/trackers/spread.rs, 224 lines, 4 tests)
+### 5.2 SpreadTracker (src/trackers/spread.rs)
 
 **Purpose:** BBO spread distribution by DTE, moneyness, and time-of-day. Focused on 0DTE ATM spreads.
 
@@ -665,7 +668,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 
 ---
 
-### 5.3 PremiumDecayTracker (src/trackers/premium_decay.rs, 216 lines, 3 tests)
+### 5.3 PremiumDecayTracker (src/trackers/premium_decay.rs)
 
 **Purpose:** Premium decay curve for 0DTE ATM options. Tracks how observed option premium decays throughout the trading day. Key deliverable: empirical premium-decay data for the 0DTE strategy's time decay budget. (Comparison against BSM-theoretical theta is reserved for a future feature — see D5 — and would require re-introducing `bsm::theta` with aligned unit conventions per the 2026-05-08 F-017 cleanup.)
 
@@ -693,7 +696,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 
 ---
 
-### 5.4 VolumeTracker (src/trackers/volume.rs, 251 lines, 4 tests)
+### 5.4 VolumeTracker (src/trackers/volume.rs)
 
 **Purpose:** Trade volume distribution by DTE, moneyness, and time-of-day.
 
@@ -720,7 +723,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 
 ---
 
-### 5.5 GreeksTracker (src/trackers/greeks.rs, 274 lines, 4 tests)
+### 5.5 GreeksTracker (src/trackers/greeks.rs)
 
 **Purpose:** Implied volatility and Greek computation for ATM options. Computes IV from BSM for ATM contracts by DTE bucket. Tracks delta, gamma, vega distributions for 0DTE ATM.
 
@@ -742,7 +745,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 - 0DTE: Estimate minutes remaining from timestamp. Close at 16:00 ET. `remaining_ns = (close_utc_ns - event_tod_ns).max(0)`. Convert to minutes, **clamp to `min(390.0)`** so that pre-market events (e.g., 04:00 ET) correctly map to one full RTH session of trading time rather than the inflated calendar interval. Then `bsm::minutes_to_years()` (252-day year, 390 min/day).
 - Non-0DTE: `dte as f64 / 365.0` (calendar days, see D2). Clamped to min 1e-6.
 
-**IV filter:** Only accepts IV where `sigma.is_finite() && sigma > 0.0 && sigma < self.max_iv` (default 5.0, configurable; see D3). Outside this range counts as `iv_failed`.
+**IV filter:** Only accepts IV where `sigma.is_finite() && sigma > 0.0 && sigma < self.max_iv` (hardcoded 5.0; a private field with no setter, constructor parameter, or TOML exposure — see D3). Outside this range counts as `iv_failed`.
 
 **Greek computation:** Call and put deltas are stored in separate signed distributions (`dte0_atm_delta_call` ∈ [0,1], `dte0_atm_delta_put` ∈ [-1,0]). Phase 2B-1 removed the prior `.abs()` which collapsed both into an uninformative magnitude-only distribution. Gamma and vega are stored as-is. All require finite values to be accepted into distributions.
 
@@ -759,7 +762,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 
 ---
 
-### 5.6 ZeroDteTracker (src/trackers/zero_dte.rs, 263 lines, 4 tests)
+### 5.6 ZeroDteTracker (src/trackers/zero_dte.rs)
 
 **Purpose:** 0DTE ATM-focused analysis for strategy validation. The most critical tracker for the 0DTE options strategy.
 
@@ -789,7 +792,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 
 ---
 
-### 5.7 PutCallRatioTracker (src/trackers/put_call.rs, 225 lines, 4 tests)
+### 5.7 PutCallRatioTracker (src/trackers/put_call.rs)
 
 **Purpose:** Put-call volume and trade ratios, both overall and 0DTE-specific. Computed per-day then aggregated with Welford.
 
@@ -815,7 +818,7 @@ All trackers implement `OptionsTracker`. Each tracker is independently enable/di
 
 ---
 
-### 5.8 OptionsEffectiveSpreadTracker (src/trackers/effective_spread.rs, 368 lines, 6 tests)
+### 5.8 OptionsEffectiveSpreadTracker (src/trackers/effective_spread.rs)
 
 **Purpose:** Realized execution cost analysis. Compares quoted spread (BBO) to effective spread (actual execution cost). Critical for limit vs market order decisions.
 
@@ -919,9 +922,9 @@ Total instances across all trackers: ~21.
 ### Time Utilities
 
 - `utc_offset_for_date(year: i32, month: u32, day: u32) -> i32` -- DST-aware UTC offset for US Eastern. Returns -5 (EST) or -4 (EDT). Uses exact DST rules (2nd Sunday March, 1st Sunday November).
-- `day_epoch_ns(year: i32, month: u32, day: u32, utc_offset: i32) -> i64` -- Midnight UTC in nanoseconds for the given trading day.
+- `midnight_utc_ns(year: i32, month: u32, day: u32) -> i64` -- Midnight UTC in nanoseconds for the given trading day. Replaces the 4-arg `day_epoch_ns()`, which is `#[deprecated]` at the pinned v0.2.1 — the profiler migrated in commit `25e3a38`.
 
-Used in `profiler::run()` to compute `DayContext.utc_offset` and `DayContext.day_epoch_ns`.
+Used in `profiler::run()` to compute `DayContext.utc_offset` and `DayContext.day_epoch_ns` (the `DayContext` FIELD keeps the legacy `day_epoch_ns` name; only the producing function changed).
 
 ---
 
@@ -1012,17 +1015,17 @@ reservoir_capacity = 10000
 
 ## 8. Design Decisions and Documented Limitations
 
-### D1: Static underlying price
+### D1: Underlying price approximated by open→close interpolation (FIND-UFO partial fix)
 
-`underlying_estimate = underlying_open` for the entire trading day. OPRA data contains only option quotes and trades -- there are no equity quotes to track intraday underlying price changes. The open price from EQUS is the best available estimate. This affects moneyness classification (a borderline ATM/OTM option may be misclassified if the underlying moves significantly intraday) and IV computation (BSM S parameter is stale).
+OPRA data contains only option quotes and trades -- there are no equity quotes to track intraday underlying price changes. Since commit `5eb31cc` (2026-05-27) the profiler no longer freezes the underlying at the day's open: each event's `underlying_estimate` linearly interpolates between the EQUS daily open and close by RTH session progress (pre-market events → open; post-market events → close; RTH events → `open + progress × (close − open)`; see the "FIND-UFO partial fix" block in `profiler.rs`). This captures the day's directional drift (e.g., $194→$183 on an earnings day) but remains an approximation: the intraday PATH is invisible, so moneyness classification (a borderline ATM/OTM option may still be misclassified) and the BSM S parameter miss intra-session swings that reverse by the close; the estimate is exact only at the open/close anchors. The full fix requires an intraday underlying feed (Axis L — see F-013/FIND-UFO); its contract is locked by the `#[ignore]`d test in `event.rs` (whose inline comments still describe the pre-interpolation frozen-at-open state — they predate the partial fix).
 
 ### D2: Time-to-expiry convention (0DTE vs non-0DTE)
 
 For 0DTE contracts, time-to-expiry is computed using 252 trading days per year and 390 minutes per trading day (via `bsm::minutes_to_years()`). For non-0DTE contracts, time-to-expiry uses 365 calendar days (`dte as f64 / 365.0`). This split follows industry convention: 0DTE requires trading-day granularity because the remaining lifetime is measured in hours, while longer-dated options use calendar days. The 252/365 discontinuity at the 0DTE/1DTE boundary is accepted.
 
-### D3: IV cap — configurable dual threshold (Phase 2B-2)
+### D3: IV cap — two-tier threshold (Phase 2B-2)
 
-The GreeksTracker filters computed IV at `sigma < self.max_iv` (default 5.0 = 500% annualized), rejecting anything above as unreasonable for statistical profiling. The BSM solver itself allows up to `MAX_IV = 10.0` (1000%) during Newton-Raphson iteration. This two-tier approach is intentional: the solver should not artificially constrain convergence, but the profiler should not pollute aggregate statistics with extreme outliers. The tracker-level threshold is now configurable via the `max_iv` field (Phase 2B-2).
+The GreeksTracker filters computed IV at `sigma < self.max_iv` (5.0 = 500% annualized), rejecting anything above as unreasonable for statistical profiling. The BSM solver itself allows up to `MAX_IV = 10.0` (1000%) during Newton-Raphson iteration. This two-tier approach is intentional: the solver should not artificially constrain convergence, but the profiler should not pollute aggregate statistics with extreme outliers. Phase 2B-2 separated the tracker-level threshold into the named `max_iv` field, but it is NOT externally configurable: the field is private, hardcoded to `5.0` in the sole constructor path (`with_sample_interval`, which `new()` delegates to), with no setter, no constructor parameter, and no TOML exposure. Changing it requires editing `greeks.rs` (contrast D7's `iv_sample_interval`, which at least has a constructor API).
 
 ### D4: IV sampling — per-day reset (Phase 2B-3, supersedes original design)
 
@@ -1038,10 +1041,10 @@ All four BBO-derived accessors apply STRICT `ask > bid` gating uniformly:
 
 | Accessor (`src/event.rs`) | Gate | Behavior at `ask == bid` |
 |---|---|---|
-| `option_mid()` (:91) | STRICT `ask > bid` | NaN |
-| `spread()` (:105)    | STRICT `ask > bid` (was `>=` pre-fix) | NaN |
-| `spread_pct()` (:114) | STRICT via `option_mid()` early-return | NaN |
-| `has_valid_bbo()` (:139) | STRICT `ask > bid` AND `bid > 0` | false |
+| `option_mid()` | STRICT `ask > bid` | NaN |
+| `spread()`     | STRICT `ask > bid` (was `>=` pre-fix) | NaN |
+| `spread_pct()` | STRICT via `option_mid()` early-return | NaN |
+| `has_valid_bbo()` | STRICT `ask > bid` AND `bid > 0` | false |
 
 **Rationale:** the prior mixed-strictness scheme (option_mid strict, spread non-strict) was a contract-plane asymmetry surfaced by Round 5 of the OPRA adversarial-validation cycle. A locked market (`ask == bid`) is not a valid BBO observation per hft-rules §8 — silently emitting `spread=0` while `option_mid` returned NaN produced an inconsistent internal state in `spread_pct` (which depends on both). Aligning to STRICT closes the asymmetry. In practice all 8 tracker consumers gate on `has_valid_bbo()` (already STRICT pre-fix), so observable output is empirically unchanged — the fix is contract-plane correctness, not output drift. Locked behavior across all four accessors is locked by a parametric invariant test in `event.rs::tests::test_invariant_finiteness_agrees_across_option_mid_spread_spread_pct`.
 
@@ -1051,7 +1054,7 @@ The IV computation sampling interval (every Nth ATM quote) is configurable via t
 
 ### D8: day_epoch_ns unused by trackers
 
-`DayContext.day_epoch_ns` (midnight UTC in nanoseconds) is computed by the profiler using `hft_statistics::time::regime::day_epoch_ns()` and passed to all trackers via `begin_day()`, but no tracker currently reads it. It is reserved for future extensions that may need absolute day-boundary timestamps (e.g., pre-market/post-market analysis, cross-day sequence alignment).
+`DayContext.day_epoch_ns` (midnight UTC in nanoseconds) is computed by the profiler via `hft_statistics::time::regime::midnight_utc_ns()` (the deprecated 4-arg `day_epoch_ns()` was replaced in commit `25e3a38`; the `DayContext` FIELD keeps the legacy name) and passed to all trackers via `begin_day()`, but no tracker currently reads it. It is reserved for future extensions that may need absolute day-boundary timestamps (e.g., pre-market/post-market analysis, cross-day sequence alignment).
 
 ### D9: Strict TOML parsing (deny_unknown_fields)
 
@@ -1059,32 +1062,37 @@ Every config struct (`ProfilerConfig`, `InputConfig`, `TrackerConfig`, `OutputCo
 
 ### D10: NVDA-only fallback safety constraint
 
-The CLI binary's built-in fallback prices (`load_nvda_fallback_prices()` in `src/bin/profile_opra.rs`) are NVDA-specific (8 trading days in November 2025). The binary REFUSES to use the fallback for any symbol other than `"NVDA"` (`profile_opra.rs:45-51` exits with a hard error). It also REFUSES to silently fall back to NVDA prices when an explicit `underlying_prices_file` fails to load (`profile_opra.rs:33-39`). And the profiler library itself REFUSES to silently use a 0.0 underlying price when no daily price is found (`profiler.rs:75-83`). The motivation: silent symbol mismatch produced silently wrong moneyness classification and silently wrong Greeks. All three guardrails turn previously silent failures into hard errors with actionable messages. The fallback survives only as a development convenience for the original NVDA Nov 2025 dataset; removal is planned for v0.2.0.
+The CLI binary's built-in fallback prices (`load_nvda_fallback_prices()` in `src/bin/profile_opra.rs`) are NVDA-specific (8 trading days in November 2025). The binary REFUSES to use the fallback for any symbol other than `"NVDA"` (`profile_opra.rs:45-51` exits with a hard error). It also REFUSES to silently fall back to NVDA prices when an explicit `underlying_prices_file` fails to load (`profile_opra.rs:33-39`). And the profiler library itself REFUSES to silently use a 0.0 underlying price when no daily price is found (the missing-underlying hard error in `profiler::run()`). The motivation: silent symbol mismatch produced silently wrong moneyness classification and silently wrong Greeks. All three guardrails turn previously silent failures into hard errors with actionable messages. The fallback survives only as a development convenience for the original NVDA Nov 2025 dataset; removal is planned for v0.2.0.
 
 ---
 
 ## 9. Test Coverage
 
-All tests are inline (`#[cfg(test)]` modules within each source file). No integration tests.
+All tests are inline (`#[cfg(test)]` modules within each source file). No integration-test directory — run `cargo test` for the live count (per-file counts are deliberately not hand-maintained here, per hft-rules §11). Two tests are `#[ignore]`d by design:
 
-| File | Tests | Description |
-|------|-------|-------------|
-| `contract.rs` | 12 | OCC parsing: standard call/put, fractional/small/large strikes, LEAPS expiry, DTE, 0DTE, malformed (too short, bad type, bad date, empty root) |
-| `bsm.rs` | 18 | norm_cdf known values + NaN propagation (Phase 2A-3), BSM call/put prices, put-call parity (5 strikes), delta (ATM/deep ITM/deep OTM), gamma (positive, peak at ATM), vega (positive), IV recovery (call, put), IV edge cases (zero price, below intrinsic, 0DTE ATM), minutes_to_years, near-expiry no-panic. (Theta test removed with F-017 cleanup 2026-05-08.) |
-| `diagnostics.rs` | 5 | Conservation law valid/violated, serde roundtrip, forward-compat partial JSON, default is zero. (Phase 2A-2.) |
-| `event.rs` | 6 | F-NEW-R5-1 BBO accessor strictness invariant: boundary triplet `{ask > bid, ask == bid, ask < bid}` + NaN bid / NaN ask, parametric cross-accessor finiteness lock. Plus 1 ignored `test_intraday_underlying_reflected_in_event_underlying_price` (F-013 FIND-UFO contract-lock, blocked on Axis L) |
-| `loader.rs` | 0 | F-003 decode_errors counter is regression-tested at the integration level — DEFERRED to Phase 2 (requires corrupt-DBN file-system fixture under `tests/fixtures/`) |
-| `moneyness.rs` | 11 | Call ATM/ATM-edge/ITM/deep-ITM/OTM/deep-OTM, put ATM/ITM/OTM, invalid underlying (0, negative, NaN), ratio computation |
-| `report_utils.rs` | 4 | dte_bucket_index (including negative DTE), moneyness_index, DTE labels match indices, moneyness labels match indices |
-| `quality.rs` | 4 | Quote/trade counting, DTE bucketing, day rollover, finalize structure |
-| `spread.rs` | 4 | Spread computation (0.05 USD), sentinel filtering, 0DTE ATM tracking, finalize structure |
-| `premium_decay.rs` | 3 | First/last premium tracking with decay calculation (~73%), empty day handling, finalize structure |
-| `volume.rs` | 4 | Trade-only counting, PCR with zero calls, DTE bucketing, finalize structure |
-| `greeks.rs` | 6 | IV computation fires for ATM, IV sampling with interval (500/10=50), non-ATM ignored, finalize structure, call delta positive / put delta negative (Phase 2B-1), IV sampling resets per day (Phase 2B-3) |
-| `zero_dte.rs` | 4 | Non-0DTE filtered, non-ATM filtered, 0DTE ATM counting, call/put separation |
-| `put_call.rs` | 4 | PCR computation (50/100=0.5), no-calls-no-PCR, day rollover, finalize structure |
-| `effective_spread.rs` | 6 | size_bucket_index, effective spread formula (2*|1.08-1.05|=0.06), trade-through classification (inside/at/outside BBO), quotes ignored, zero-size ignored, finalize structure |
-| **Total** | **91 + 1 ignored** | |
+- `event.rs::tests::test_intraday_underlying_reflected_in_event_underlying_price` — F-013 / FIND-UFO contract-lock for the FULL intraday-underlying fix (blocked on Axis L; the shipped open→close interpolation is a partial fix, see D1).
+- `profiler.rs::tests::test_equs_volume_offramp_wired_on_real_data` — reads the real (large, gitignored) EQUS file to confirm the O/S equity-volume denominator off-ramp; run on demand with `cargo test -- --ignored`.
+
+| File | Coverage |
+|------|----------|
+| `contract.rs` | OCC parsing: standard call/put, fractional/small/large strikes, LEAPS expiry, DTE, 0DTE, malformed (too short, bad type, bad date, empty root) |
+| `bsm.rs` | norm_cdf known values + NaN propagation (Phase 2A-3), BSM call/put prices, put-call parity (5 strikes), delta (ATM/deep ITM/deep OTM), gamma (positive, peak at ATM), vega (positive), IV recovery (call, put), IV edge cases (zero price, below intrinsic, 0DTE ATM), minutes_to_years, near-expiry no-panic. (Theta test removed with F-017 cleanup 2026-05-08.) |
+| `config.rs` | `[os_ratio]` config parsing: defaults, explicit values, and the serde-default-`true` backward-compat lock for pre-section configs |
+| `diagnostics.rs` | Conservation law valid/violated, serde roundtrip, forward-compat partial JSON, default is zero, action sub-counter partition of `dispatched`. (Phase 2A-2.) |
+| `event.rs` | F-NEW-R5-1 BBO accessor strictness invariant: boundary triplet `{ask > bid, ask == bid, ask < bid}` + NaN bid / NaN ask, parametric cross-accessor finiteness lock. Plus the ignored `test_intraday_underlying_reflected_in_event_underlying_price` (F-013 FIND-UFO contract-lock, blocked on Axis L) |
+| `loader.rs` | (no inline tests) F-003 decode_errors counter is regression-tested at the integration level — DEFERRED to Phase 2 (requires corrupt-DBN file-system fixture under `tests/fixtures/`) |
+| `moneyness.rs` | Call ATM/ATM-edge/ITM/deep-ITM/OTM/deep-OTM, put ATM/ITM/OTM, invalid underlying (0, negative, NaN), ratio computation |
+| `os_ratio.rs` | Johnson-So Eq. 9 fraction/round-lot golden, worked ΔO/S series + warmup-boundary off-by-one, `opvol=0`→finite-zero, `eqvol=0`→null, join-miss recorded-not-dropped, determinism/date-sort byte-equality, `n_warmup_null` clamp, no-look-ahead invariant |
+| `profiler.rs` | The ignored-by-default real-EQUS integration test (O/S denominator off-ramp; see above) |
+| `report_utils.rs` | dte_bucket_index (including negative DTE), moneyness_index, DTE labels match indices, moneyness labels match indices |
+| `quality.rs` | Quote/trade counting, DTE bucketing, day rollover, finalize structure |
+| `spread.rs` | Spread computation (0.05 USD), sentinel filtering, 0DTE ATM tracking, finalize structure |
+| `premium_decay.rs` | First/last premium tracking with decay calculation (~73%), empty day handling, finalize structure |
+| `volume.rs` | Trade-only counting, PCR with zero calls, DTE bucketing, finalize structure |
+| `greeks.rs` | IV computation fires for ATM, IV sampling with interval (500/10=50), non-ATM ignored, finalize structure, call delta positive / put delta negative (Phase 2B-1), IV sampling resets per day (Phase 2B-3) |
+| `zero_dte.rs` | Non-0DTE filtered, non-ATM filtered, 0DTE ATM counting, call/put separation |
+| `put_call.rs` | PCR computation (50/100=0.5), no-calls-no-PCR, day rollover, finalize structure |
+| `effective_spread.rs` | size_bucket_index, effective spread formula (2*|1.08-1.05|=0.06), trade-through classification (inside/at/outside BBO), quotes ignored, zero-size ignored, finalize structure |
 
 ---
 
