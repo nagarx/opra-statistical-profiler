@@ -47,7 +47,7 @@ pub enum Side {
 
 /// Enriched options event passed to all trackers.
 ///
-/// Created by the profiler's ContractRouter from raw `CbboMsg` records
+/// Created by the profiler's ContractRouter from `loader::Cmbp1Record` values
 /// combined with `ContractMap` lookup and underlying price context.
 pub struct OptionsEvent<'a> {
     /// Event timestamp (UTC nanoseconds since epoch).
@@ -81,7 +81,16 @@ pub struct OptionsEvent<'a> {
     /// Current underlying stock price in USD.
     pub underlying_price: f64,
 
-    // ── CbboMsg fields previously unread (Phase 2A-1, 2026-05-27) ──
+    // ── Record fields previously unread (Phase 2A-1, 2026-05-27) ──
+    //
+    // `sequence` was REMOVED here on 2026-08-01 with the dbn v0.20.0 -> v0.64.0
+    // bump. dbn 0.21.0 reclassified bytes [44..48) as `_reserved2` on CMBP-1 and
+    // `_reserved3` on CBBO — the vendor no longer defines a `sequence` there
+    // (see dbn 0.35.0: "Removed incorrect `sequence` and `depth` Python type
+    // stubs for `CMBP1Msg` and `CBBOMsg`"). The field was write-only in this
+    // crate — set once in `profiler.rs` and read by no tracker, no exporter and
+    // no test — so no output value depends on it. Carrying a reserved byte
+    // forward would have been a latent silent-wrongness trap.
     /// Originating venue for this event (`RecordHeader.publisher_id`).
     /// Maps to `dbn::Publisher` enum via `Publisher::try_from(u16)`.
     pub publisher_id: u16,
@@ -90,14 +99,13 @@ pub struct OptionsEvent<'a> {
     /// Venue holding the best ask at consolidated NBBO (`ConsolidatedBidAskPair.ask_pb`).
     pub ask_pb: u16,
     /// SIP-vs-exchange-send latency delta in nanoseconds, capped at 2 seconds
-    /// (`CbboMsg.ts_in_delta`). Zero if unavailable.
+    /// (`Cmbp1Msg.ts_in_delta`). Zero if unavailable — including for every
+    /// CBBO-1s/1m record, whose schema has no such field.
     pub ts_in_delta: i32,
-    /// Raw dbn FlagSet byte (`CbboMsg.flags.raw()`).
+    /// Raw dbn FlagSet byte (`Cmbp1Msg.flags.raw()` / `CbboMsg.flags.raw()`).
     /// Bit positions: MAYBE_BAD_BOOK=0x04, BAD_TS_RECV=0x08, SNAPSHOT=0x20.
     pub flags: u8,
-    /// Venue-assigned message sequence number (`CbboMsg.sequence`).
-    pub sequence: u32,
-    /// Capture-server timestamp in UTC nanoseconds (`CbboMsg.ts_recv`).
+    /// Capture-server timestamp in UTC nanoseconds (`ts_recv`).
     pub ts_recv: i64,
 }
 

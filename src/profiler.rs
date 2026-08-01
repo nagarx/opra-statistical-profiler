@@ -155,7 +155,7 @@ pub fn run(
         for record in records.by_ref() {
             diag.total_decoded += 1;
 
-            let contract = match contract_map.get(record.hd.instrument_id) {
+            let contract = match contract_map.get(record.instrument_id) {
                 Some(c) => c,
                 None => {
                     diag.unknown_instrument += 1;
@@ -164,7 +164,7 @@ pub fn run(
             };
 
             // Flags-based observability (NOT filters — events still dispatched)
-            let flags_raw = record.flags.raw();
+            let flags_raw = record.flags;
             if flags_raw & 0x04 != 0 {
                 diag.observability.bad_book_flagged += 1;
             }
@@ -175,11 +175,15 @@ pub fn run(
                 diag.observability.snapshot_flagged += 1;
             }
 
-            let bid_px = price_or_nan(record.levels[0].bid_px);
-            let ask_px = price_or_nan(record.levels[0].ask_px);
+            let bid_px = price_or_nan(record.bid_px);
+            let ask_px = price_or_nan(record.ask_px);
             let trade_price = price_or_nan(record.price);
 
-            let action = match record.action as u8 {
+            // `record.action` is `loader::ACTION_UNAVAILABLE` (0) for CBBO-1s/1m
+            // input, where the schema has no `action` field at all — those land
+            // in `Action::Other` and are additionally counted by the loader's
+            // `cbbo_action_unavailable`. See loader.rs module docs.
+            let action = match record.action {
                 b'T' => {
                     diag.observability.action_trade += 1;
                     Action::Trade
@@ -194,7 +198,7 @@ pub fn run(
                 }
             };
 
-            let side = match record.side as u8 {
+            let side = match record.side {
                 b'B' => Side::Bid,
                 b'A' => Side::Ask,
                 _ => Side::None,
@@ -204,7 +208,7 @@ pub fn run(
 
             // Per-event underlying estimate via time-weighted open→close interpolation.
             // Pre-market events use open; post-market use close; RTH linearly interpolates.
-            let event_tod_ns = record.hd.ts_event as i64 % (24 * 3600 * 1_000_000_000_i64);
+            let event_tod_ns = record.ts_event as i64 % (24 * 3600 * 1_000_000_000_i64);
             let underlying_estimate = if event_tod_ns <= rth_open_utc_ns {
                 underlying_open
             } else if event_tod_ns >= rth_close_utc_ns {
@@ -232,8 +236,8 @@ pub fn run(
             };
 
             let event = OptionsEvent {
-                ts_event: record.hd.ts_event as i64,
-                instrument_id: record.hd.instrument_id,
+                ts_event: record.ts_event as i64,
+                instrument_id: record.instrument_id,
                 contract,
                 action,
                 side,
@@ -245,23 +249,22 @@ pub fn run(
                 },
                 bid_px,
                 ask_px,
-                bid_sz: record.levels[0].bid_sz,
-                ask_sz: record.levels[0].ask_sz,
+                bid_sz: record.bid_sz,
+                ask_sz: record.ask_sz,
                 dte,
                 moneyness,
                 moneyness_ratio,
                 underlying_price: underlying_estimate,
-                publisher_id: record.hd.publisher_id,
-                bid_pb: record.levels[0].bid_pb,
-                ask_pb: record.levels[0].ask_pb,
+                publisher_id: record.publisher_id,
+                bid_pb: record.bid_pb,
+                ask_pb: record.ask_pb,
                 ts_in_delta: record.ts_in_delta,
-                flags: record.flags.raw(),
-                sequence: record.sequence,
+                flags: record.flags,
                 ts_recv: record.ts_recv as i64,
             };
 
             // Reserved for future regime-aware trackers. Currently unused by all trackers.
-            let regime = time_regime(record.hd.ts_event as i64, utc_offset);
+            let regime = time_regime(record.ts_event as i64, utc_offset);
 
             diag.dispatched += 1;
 
@@ -284,11 +287,15 @@ pub fn run(
             day_events += 1;
         }
 
-        // Harvest day-level decode_errors BEFORE `records` goes out of scope at the
-        // end of this loop iteration (F-003 — closes silent decode-error swallow).
+        // Harvest day-level loader counters BEFORE `records` goes out of scope at
+        // the end of this loop iteration (F-003 — closes silent decode-error
+        // swallow; `unsupported_rtype` + `cbbo_action_unavailable` added 2026-08-01
+        // with the dbn v0.64.0 rtype dispatch, same never-drop-silently rule).
         let day_decode_errors = records.decode_errors();
         total_decode_errors += day_decode_errors;
         diag.decode_errors += day_decode_errors;
+        diag.unsupported_rtype += records.unsupported_rtype();
+        diag.cbbo_action_unavailable += records.cbbo_action_unavailable();
 
         for tracker in trackers.iter_mut() {
             tracker.end_of_day(day_index);

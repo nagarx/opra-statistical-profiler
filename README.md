@@ -32,7 +32,7 @@ High-performance Rust profiler for OPRA options microstructure analysis. Process
 
 ### Data Flow
 
-1. **Cmbp1Loader** reads `.dbn.zst` files with a 1 MB I/O buffer, streaming `CbboMsg` records.
+1. **Cmbp1Loader** reads `.dbn.zst` files with a 1 MB I/O buffer, dispatching on rtype (0xB1 CMBP-1 / 0xC2 TCBBO -> `dbn::Cmbp1Msg`; 0xC0/0xC1 CBBO-1s/1m -> `dbn::CbboMsg`) and streaming normalized `Cmbp1Record` values.
 2. **SymbologyParser** resolves instrument IDs to OCC option symbols using DBN metadata.
 3. **ContractRouter** parses OCC symbols into `ContractInfo` (strike, expiration, call/put), classifies moneyness, computes DTE, and enriches each record into an `OptionsEvent`.
 4. All enabled **trackers** receive every enriched event in a single pass -- no re-reads.
@@ -88,7 +88,7 @@ The profiler has no dependency on `mbo-lob-reconstructor` or `mbo-statistical-pr
 
 - **Rust 1.82+** (edition 2021; MSRV per `Cargo.toml` `rust-version`, enforced in CI). The working toolchain is pinned to **1.94.0** via `rust-toolchain.toml` (#PY-220, coordinated across the monorepo's Rust crates).
 - **hft-statistics** -- fetched automatically from GitHub: `https://github.com/nagarx/hft-statistics.git` (pinned to tag `v0.2.1`)
-- **dbn v0.20.0** -- fetched automatically from GitHub: `https://github.com/databento/dbn.git` (tag `v0.20.0`)
+- **dbn v0.64.0** -- fetched automatically from GitHub: `https://github.com/databento/dbn.git` (tag `v0.64.0`). Bumped from `v0.20.0` on 2026-08-01; dbn 0.21.0 split the old four-rtype `CbboMsg` into `Cmbp1Msg` + `CbboMsg`, which is why `loader.rs` dispatches on rtype.
 
 No other external system dependencies required. All crate dependencies are resolved by Cargo.
 
@@ -259,7 +259,7 @@ Run-dependent values above (`n_days`, `total_events`, `runtime_secs`, `throughpu
 | Crate | Version / Source | Purpose |
 |-------|-----------------|---------|
 | `hft-statistics` | git: `github.com/nagarx/hft-statistics.git` (tag `v0.2.1`) | Statistical primitives: Welford, StreamingDistribution, IntradayCurveAccumulator, DST-aware time |
-| `dbn` | git: `github.com/databento/dbn.git` (v0.20.0) | CMBP-1 `.dbn.zst` decoding, `CbboMsg` record type, metadata/symbology |
+| `dbn` | git: `github.com/databento/dbn.git` (v0.64.0) | CMBP-1 / CBBO `.dbn.zst` decoding, `Cmbp1Msg` + `CbboMsg` record types, metadata/symbology |
 | `ahash` | 0.8 | High-performance hashing for contract maps and unique-contract sets |
 | `serde` | 1.0 (with `derive`) | Serialization/deserialization for config and report types |
 | `serde_json` | 1.0 | JSON report output |

@@ -16,7 +16,18 @@ path = "src/lib.rs"
 
 [dependencies]
 hft-statistics = { git = "https://github.com/nagarx/hft-statistics.git", tag = "v0.2.1" }
-dbn = { git = "https://github.com/databento/dbn.git", tag = "v0.20.0" }
+# Databento data format. Decodes CMBP-1 (rtype 0xB1) and CBBO-1s/1m (0xC0/0xC1).
+#
+# Pin history:
+#   v0.20.0 -> v0.64.0 (2026-08-01). At v0.20.0 one `CbboMsg` struct served all
+#   four rtypes, so a single `decode_record::<CbboMsg>()` covered both feeds.
+#   dbn 0.21.0 ("Changed the layout of `CbboMsg` to better match `BboMsg`")
+#   SPLIT it — 0xB1/0xC2 -> `Cmbp1Msg`, 0xC0/0xC1 -> `CbboMsg` — and reclassified
+#   `action`/`ts_in_delta`/`sequence` as reserved on the CBBO half. `loader.rs`
+#   therefore dispatches on rtype. Offsets never moved: 80,000,000 OPRA CMBP-1
+#   and 31,039,682 CBBO-1m records decode byte-identically across the two pins
+#   (`.session_state/2026-08-01-blast-radius/DBN_VERSION_DIFF.md` §2-3).
+dbn = { git = "https://github.com/databento/dbn.git", tag = "v0.64.0" }
 
 ahash = "0.8"
 serde = { version = "1.0", features = ["derive"] }

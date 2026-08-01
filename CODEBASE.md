@@ -24,7 +24,7 @@ High-performance statistical profiler for OPRA options microstructure analysis. 
 
 **Dependencies:**
 - `hft-statistics` (git, github.com/nagarx/hft-statistics.git, pinned to tag `v0.2.1`) -- Welford, streaming distribution, intraday curve accumulator, DST-aware time utilities
-- `dbn` v0.20.0 (git, github.com/databento/dbn.git) -- Databento binary format decoder
+- `dbn` v0.64.0 (git, github.com/databento/dbn.git) -- Databento binary format decoder. Bumped from v0.20.0 on 2026-08-01 (dbn 0.21.0 split `CbboMsg` -> `Cmbp1Msg` + `CbboMsg`)
 - `ahash` 0.8 -- Fast hashing for contract maps and unique contract sets
 - `serde` + `serde_json` + `toml` -- Serialization, JSON output, TOML config
 - `chrono` 0.4 -- Date handling (NaiveDate for trading dates, expirations)
@@ -57,7 +57,7 @@ DynDecoder (dbn, VersionUpgradePolicy::AsIs)
     |         OCC format: ROOT__YYMMDDCSSSSSSSS
     |
     v
-For each CbboMsg record:
+For each Cmbp1Record (normalized from Cmbp1Msg or CbboMsg by rtype):
     |
     +---> contract_map.get(instrument_id) --> ContractInfo or skip
     |
@@ -108,7 +108,7 @@ write_output():
 4. Build `DayContext`, call `begin_day()` on all trackers
 5. Open `.dbn.zst`, build `ContractMap` from metadata symbology
 6. Precompute the RTH open/close boundaries used for per-event `underlying_estimate` interpolation between `underlying_open` and `underlying_close` (FIND-UFO partial fix -- see D1)
-7. Iterate all `CbboMsg` records, enrich into `OptionsEvent` (incl. the interpolated per-event `underlying_estimate`), dispatch (and, when `os_ratio.enabled`, accrue the DTE-banded per-day option trade volume for the O/S numerator)
+7. Iterate all `Cmbp1Record` values, enrich into `OptionsEvent` (incl. the interpolated per-event `underlying_estimate`), dispatch (and, when `os_ratio.enabled`, accrue the DTE-banded per-day option trade volume for the O/S numerator)
 8. Call `end_of_day()`, `reset_day()` on all trackers
 9. Repeat for next file
 
@@ -308,7 +308,7 @@ Streaming loader for OPRA CMBP-1 `.dbn.zst` files.
 
 Opens the `.dbn.zst` file with 1 MB buffered reader, creates a `DynDecoder` with `VersionUpgradePolicy::AsIs`, clones metadata for symbology, returns metadata + iterator.
 
-**Iterator behavior:** Calls `decoder.decode_record::<CbboMsg>()`. On decode error, logs a warning and continues to next record (tolerant of rare corrupt records). Counts all successfully yielded records via `.count()`.
+**Iterator behavior:** Calls `decoder.decode_record_ref()`, then picks the concrete type by `hd.rtype` -- 0xB1 `CMBP_1` / 0xC2 `TCBBO` -> `Cmbp1Msg`, 0xC0 `CBBO_1S` / 0xC1 `CBBO_1M` -> `CbboMsg` -- and normalizes into `Cmbp1Record`. On decode error, a short record, or an rtype it does not decode, it logs a warning and continues (tolerant of rare corrupt records); the rtype catch-all is never silent, it increments `unsupported_rtype`. Counters: `.count()`, `.decode_errors()`, `.unsupported_rtype()`, `.cbbo_action_unavailable()`.
 
 ---
 
@@ -342,7 +342,7 @@ Single-pass profiling engine. Orchestrates file discovery, day processing, event
 
 **Event enrichment (inside run()):**
 
-The dispatch loop reads ALL 19 non-reserved CbboMsg fields (Phase 2A-1), increments `ProfileDiagnostics` counters at every decision point (Phase 2A-2), and computes `time_regime()` from `hft_statistics` (Phase 2A-4). Every record is accounted for via the conservation law: `total_decoded == unknown_instrument + dispatched`.
+The dispatch loop reads ALL 18 non-reserved record fields (Phase 2A-1; was 19 until the dead `sequence` was dropped on 2026-08-01 -- dbn 0.21.0 reclassified those bytes as reserved and no tracker ever read the value), increments `ProfileDiagnostics` counters at every decision point (Phase 2A-2), and computes `time_regime()` from `hft_statistics` (Phase 2A-4). Every record is accounted for via the conservation law: `total_decoded == unknown_instrument + dispatched`.
 
 Key detail: `underlying_estimate` is computed **per event** by linear open→close interpolation on RTH session progress (pre-market events → `underlying_open`; post-market → `underlying_close`; RTH → `open + progress × (close − open)`). This is the FIND-UFO partial fix (commit `5eb31cc`); the intraday path remains invisible — see D1.
 

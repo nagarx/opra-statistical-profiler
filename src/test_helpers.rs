@@ -74,7 +74,6 @@ pub mod helpers {
             ask_pb: 0,
             ts_in_delta: 0,
             flags: 0,
-            sequence: 0,
             ts_recv: RTH_OPEN_UTC_NS + 5 * NS_PER_MINUTE,
         }
     }
@@ -109,7 +108,6 @@ pub mod helpers {
             ask_pb: 0,
             ts_in_delta: 0,
             flags: 0,
-            sequence: 0,
             ts_recv: RTH_OPEN_UTC_NS + 10 * NS_PER_MINUTE,
         }
     }
