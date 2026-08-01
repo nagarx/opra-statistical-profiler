@@ -1,6 +1,30 @@
 [package]
 name = "opra-statistical-profiler"
-version = "0.1.0"
+# 0.2.0 (2026-08-01): MINOR under VERSIONING.md R7, PROVEN under R8. First tag
+# this repo has ever carried; 0.1.0 was never incremented.
+#
+# The dbn decoder moved v0.20.0 -> v0.64.0 and the decode was split by rtype
+# (dbn 0.21.0 split `CbboMsg` into `Cmbp1Msg` for 0xB1/0xC2 and `CbboMsg` for
+# 0xC0/0xC1). Byte-identity measured on real fixtures: CMBP-1 (0xB1, the
+# PRODUCTION path) 9/9 tracker JSONs bit-identical; NVDA 0DTE CBBO (0xC1) 9/9
+# bit-identical.
+#
+# ⚠️ MINOR is claimed with ONE bounded, deliberate behaviour change stated
+# openly rather than buried: on CBBO-1s/1m, byte 28 is `_reserved1` from dbn
+# 0.21.0 onward. This crate now REFUSES to read a vendor-reserved byte, so
+# `action` is ACTION_UNAVAILABLE -> Action::Other. On an INDEX CBBO fixture that
+# reclassifies 180 of 500,000 records that v0.20.0 called trades (and +48
+# sentinel_events downstream of those same 180). MINOR still holds because it
+# touches NO PERSISTED OUTPUT: every profiler run on disk (output_opra_test,
+# output_opra_nov14, output_opra_nvda) used filename_pattern
+# `opra-pillar-{date}.cmbp-1.dbn.zst` — there has never been a Rust-profiler
+# CBBO run, and the INDEX CBBO data is consumed exclusively by Python via the
+# databento SDK, which never touches this crate. The failure mode is loud
+# (WARN + `cbbo_action_unavailable` counter in all 9 tracker JSONs), not silent.
+#
+# Also honest: `profiler_version` is embedded in tracker JSONs
+# (src/profiler.rs:414), so that FIELD moves with this bump by construction.
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.82"
 authors = ["nagarx"]
@@ -15,7 +39,22 @@ name = "opra_statistical_profiler"
 path = "src/lib.rs"
 
 [dependencies]
-hft-statistics = { git = "https://github.com/nagarx/hft-statistics.git", tag = "v0.2.1" }
+# DELIBERATELY HELD AT v0.2.1 — a recorded R4 deviation (VERSIONING.md), not an
+# oversight. hft-statistics 0.2.1 -> 0.3.0 is NOT byte-identical on the surface
+# this crate uses: `WelfordAccumulator`, `IntradayCurveAccumulator`, and
+# `time::regime::{time_regime, midnight_utc_ns, utc_offset_for_date}` all changed
+# across that span (utc_offset_for_date was reimplemented chrono -> days_to_ymd,
+# and its invalid-date path went from returning -5 to panicking). Moving this pin
+# is a research act requiring a differential re-run, not a versioning chore.
+#
+# `version = "=0.2.1"` is LOAD-BEARING, not decoration. Without it the untracked
+# `.cargo/config.toml` [patch] silently substitutes the local 0.3.0 checkout: a
+# git dep carries an implicit `*` requirement, and `*` refuses PRE-RELEASE
+# versions but accepts release ones — so while the local crate read `0.3.0-dev`
+# the patch was inert, and the moment it was finalized to `0.3.0` (2026-08-01)
+# the patch began applying and silently overrode this pin. The explicit `=0.2.1`
+# makes the patch fail to match, restoring "what is declared is what is built".
+hft-statistics = { git = "https://github.com/nagarx/hft-statistics.git", tag = "v0.2.1", version = "=0.2.1" }
 # Databento data format. Decodes CMBP-1 (rtype 0xB1) and CBBO-1s/1m (0xC0/0xC1).
 #
 # Pin history:
