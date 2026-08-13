@@ -1,8 +1,28 @@
 # OPRA Statistical Profiler
 
-High-performance Rust profiler for OPRA options microstructure analysis. Processes raw OPRA CMBP-1 `.dbn.zst` files in a single pass through composable analysis trackers, producing JSON statistical profiles with full provenance.
+High-performance Rust profiler for OPRA options microstructure analysis. Processes configured OPRA quote DBN streams (CMBP-1/TCBBO or CBBO-1s/1m) in a single pass through composable analysis trackers, producing JSON statistical profiles with bounded run metadata.
 
 > **Pipeline scope (2026-06-02).** This module is part of an **intraday trading research pipeline** — an experiment-first platform for discovering and validating *any* profitable **intraday** trading edge (no overnight positions), across approach classes (microstructure/HFT, scalping, intraday momentum, intraday statistical arbitrage, …) and instruments (equities, futures, same-day options). The pipeline *originated* as a high-frequency NVDA MBO/LOB microstructure system — that origin explains the "HFT" / "LOB" / "MBO" naming here — and that microstructure-direction program is now one (largely-closed) track among many. **Names are historical; the mission is general.** This module's role: a Rust OPRA options-data profiler — 8 trackers incl. BSM Greeks/IV, moneyness, premium decay (multi-million evt/s single-pass); the options-analytics surface (directly relevant to the same-day-options approach class). For the full mission + approach taxonomy + capability-readiness boundary, see root `CLAUDE.md` §Research Scope & Charter (+ `CROSS_ASSET_OFI_FINDINGS_AND_ISSUES_2026_06_01.md` §9).
+
+> **Current Databento boundary (2026-08-02).** The decoder pins `dbn`
+> `v0.64.0` at commit
+> `64e5416f53b8ebecc9f1799d715dec8baa4c17eb` with `AsIs` version handling.
+> It dispatches CMBP-1/TCBBO to `Cmbp1Msg` and CBBO-1s/1m to `CbboMsg`, retains
+> `ts_event` and `ts_recv`, and records CBBO's unavailable action/`ts_in_delta`
+> instead of reading reserved bytes. Prices are OPRA option USD after sentinel
+> handling and division by 1e9; sizes are contracts. The committed
+> `output_opra_nvda/` artifacts cover exactly eight days and 10,279,875,306
+> dispatched records; they are not the current SSD inventory. Use the static
+> SSD Databento release for raw-file membership. All analytic bucketing and
+> tracker time axes use `ts_event`; `ts_recv` is retained only as an event field
+> and diagnostic input here, even though it is the DBN primary/index clock for
+> these quote schemas. CBBO has no action field in the pinned decoder and is
+> normalized to `Action::Other`, so trade-conditioned metrics are unavailable
+> for CBBO input rather than evidence of zero trades. Output `_provenance` is
+> bounded runtime/config metadata: it does not bind the exact input file list,
+> input hashes, catalog release identity, or producer Git SHA, and its `schema`
+> value is currently hardcoded to `cmbp-1`. Pair every reusable run with an
+> external catalog/run receipt; `_provenance` alone cannot identify its corpus.
 
 ## Performance
 
@@ -17,7 +37,7 @@ High-performance Rust profiler for OPRA options microstructure analysis. Process
 ## Architecture
 
 ```
-.dbn.zst (CMBP-1) --> Cmbp1Loader --> SymbologyParser --> ContractRouter
+.dbn.zst (configured OPRA quote schema) --> Cmbp1Loader --> SymbologyParser --> ContractRouter
                                                               |
                                                  +------------+------------+
                                                  |            |            |
@@ -114,7 +134,7 @@ The `RUST_LOG` environment variable controls log verbosity (`info`, `debug`, `wa
 
 ### Data Requirements
 
-The profiler reads OPRA CMBP-1 `.dbn.zst` files (Databento format). You must adjust `data_dir` in your config to point to the directory containing your `.dbn.zst` files. The filename pattern uses `{date}` as a placeholder for the 8-digit date (YYYYMMDD).
+The profiler reads configured OPRA quote `.dbn.zst` files (Databento format): CMBP-1/TCBBO and CBBO-1s/1m are supported by the rtype-aware loader. You must adjust `data_dir` in your config to point to the directory containing those files. The filename pattern uses `{date}` as a placeholder for the 8-digit date (YYYYMMDD). Contract identity comes from DBN metadata/symbology embedded with the quote stream; this profiler does not consume the separately retained OPRA Definition or Statistics parents.
 
 Optionally provide an EQUS OHLCV `.dbn.zst` file via `underlying_prices_file` for accurate underlying prices. If not provided, the binary falls back to built-in NVDA prices for the 8-day November 2025 window. **The fallback only applies when `symbol = "NVDA"`** — any other symbol without `underlying_prices_file` is rejected with a hard error to prevent silent wrong-symbol pricing. Trading dates with no available underlying price (whether from file or fallback) also produce a hard error.
 
@@ -252,7 +272,7 @@ Every JSON file includes a `_provenance` block containing:
 }
 ```
 
-Run-dependent values above (`n_days`, `total_events`, `runtime_secs`, `throughput_events_per_sec`) are illustrative — each run records its own. `output_schema_version` tracks the `OUTPUT_SCHEMA_VERSION` constant in `profiler.rs` and `diagnostics_schema_version` tracks `PROFILER_DIAGNOSTICS_SCHEMA_VERSION` in `diagnostics.rs` (both SemVer'd; verify against the constants, not this snippet). The `config` field embeds the full TOML configuration used for the run, enabling exact reproduction.
+Run-dependent values above (`n_days`, `total_events`, `runtime_secs`, `throughput_events_per_sec`) are illustrative — each run records its own. `output_schema_version` tracks the `OUTPUT_SCHEMA_VERSION` constant in `profiler.rs` and `diagnostics_schema_version` tracks `PROFILER_DIAGNOSTICS_SCHEMA_VERSION` in `diagnostics.rs` (both SemVer'd; verify against the constants, not this snippet). The `config` field embeds the full TOML configuration used for the run, but that is not exact reproduction provenance: `_provenance` omits the resolved input-file list and hashes, catalog release identity, and producer Git SHA, and currently labels every run's `schema` as `cmbp-1`. Bind those externally before treating an output as reproducible.
 
 ## Dependencies
 
@@ -341,9 +361,9 @@ DTE is bucketed into 4 fixed categories:
 
 These buckets are hardcoded in `report_utils.rs`. The choice reflects the 0DTE-focused analysis goal: most granularity where it matters most.
 
-### Regime Parameter Reserved but Unused
+### Regime Parameter Computed but Unused
 
-The `process_event` method on the `OptionsTracker` trait accepts a `regime: u8` parameter. This is reserved for future time-of-day regime analysis (e.g., open auction, morning, midday, close). Currently all events are passed with `regime = 0`. The parameter exists to avoid a breaking trait change when regime-aware analysis is added.
+The dispatch loop computes `time_regime(ts_event, utc_offset)` and passes that real value to `OptionsTracker::process_event`. Every current tracker names the argument `_regime` and ignores it, so no published tracker metric is regime-conditioned. The parameter is therefore wired but analytically unused; it is not true that every event is passed with `regime = 0`.
 
 ### IV Sampling Interval
 

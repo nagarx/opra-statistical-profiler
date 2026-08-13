@@ -2,13 +2,31 @@
 
 Deep technical reference for the `opra-statistical-profiler` Rust crate. Covers architecture, every module, all formulas, configuration, and design decisions.
 
+> **Databento dataset/run boundary (2026-08-02).** Live source pins `dbn`
+> `v0.64.0` at commit
+> `64e5416f53b8ebecc9f1799d715dec8baa4c17eb` with
+> `VersionUpgradePolicy::AsIs`. The rtype-aware loader preserves `ts_event` and
+> `ts_recv`; CBBO-1s/1m action and `ts_in_delta` are unavailable and explicitly
+> counted. OPRA prices are interpreted as option USD after sentinel handling
+> and division by 1e9, and sizes as contracts. Committed
+> `output_opra_nvda/` is a frozen eight-day, 10,279,875,306-record run, not the
+> full current SSD population. Raw membership comes from the static SSD
+> Databento release. All analytic bucketing and tracker time axes use
+> `ts_event`; `ts_recv` is retained but is not the analytic clock, even though
+> it is the DBN primary/index clock for these quote schemas. CBBO records map
+> to `Action::Other`, so trade-conditioned metrics are unavailable on CBBO.
+> Output `_provenance` contains bounded config/runtime metadata but no resolved
+> file list, input hashes, catalog release ID, or producer Git SHA, and its
+> `schema` field is hardcoded to `cmbp-1`; bind an external run receipt before
+> treating a result as corpus-reproducible.
+
 > **Pipeline scope (2026-06-02).** This module is part of an **intraday trading research pipeline** — an experiment-first platform for discovering and validating *any* profitable **intraday** trading edge (no overnight positions), across approach classes (microstructure/HFT, scalping, intraday momentum, intraday statistical arbitrage, …) and instruments (equities, futures, same-day options). The pipeline *originated* as a high-frequency NVDA MBO/LOB microstructure system — that origin explains the "HFT" / "LOB" / "MBO" naming here — and that microstructure-direction program is now one (largely-closed) track among many. **Names are historical; the mission is general.** This module's role: a Rust OPRA options-data profiler — 8 trackers incl. BSM Greeks/IV, moneyness, premium decay (multi-million evt/s single-pass); the options-analytics surface (directly relevant to the same-day-options approach class). For the full mission + approach taxonomy + capability-readiness boundary, see root `CLAUDE.md` §Research Scope & Charter (+ `CROSS_ASSET_OFI_FINDINGS_AND_ISSUES_2026_06_01.md` §9).
 
 ---
 
 ## 1. Overview
 
-High-performance statistical profiler for OPRA options microstructure analysis. Processes raw OPRA CMBP-1 `.dbn.zst` files in a single pass through composable analysis trackers, producing JSON statistical profiles.
+High-performance statistical profiler for OPRA options microstructure analysis. Processes configured OPRA quote DBN streams (CMBP-1/TCBBO or CBBO-1s/1m) in a single pass through composable analysis trackers, producing JSON statistical profiles.
 
 | Property | Value |
 |----------|-------|
@@ -19,7 +37,7 @@ High-performance statistical profiler for OPRA options microstructure analysis. 
 | Throughput | multi-million events/sec — per-run value recorded in every output's `_provenance.throughput_events_per_sec` |
 | CI | `.github/workflows/ci.yml`: `fmt --check` / `clippy -D warnings` / `test` / `doc` with `RUSTDOCFLAGS=-D warnings` / MSRV-1.82 check |
 | Architecture | Single-pass composable tracker dispatch |
-| Input | OPRA CMBP-1 `.dbn.zst` (consolidated BBO + trades) + EQUS OHLCV `.dbn.zst` (underlying open/close **and** the O/S equity-volume denominator) |
+| Input | Configured OPRA quote DBN: CMBP-1/TCBBO or CBBO-1s/1m, with embedded metadata/symbology; optional EQUS OHLCV DBN supplies underlying open/close **and** the O/S equity-volume denominator |
 | Output | Numbered JSON files with `_provenance` metadata — **two kinds**: one per-tracker profile per enabled tracker, plus a post-loop O/S-ratio aggregate report (§5.9) |
 
 **Dependencies:**
@@ -41,7 +59,7 @@ The profiler does NOT depend on `mbo-statistical-profiler` or `MBO-LOB-reconstru
 ## 2. Architecture -- Full Data Flow
 
 ```
-.dbn.zst (OPRA CMBP-1)
+.dbn.zst (configured OPRA quote schema)
     |
     v
 Cmbp1Loader (1 MB I/O buffer, BufReader)
@@ -269,7 +287,6 @@ Enriched options event type and day-level context.
 | `ask_pb` | `u16` | Best-ask venue at consolidated NBBO. Phase 2A-1. |
 | `ts_in_delta` | `i32` | SIP-vs-exchange latency (ns, capped 2s). Phase 2A-1. |
 | `flags` | `u8` | Raw dbn FlagSet: MAYBE_BAD_BOOK=0x04, BAD_TS_RECV=0x08, SNAPSHOT=0x20. Phase 2A-1. |
-| `sequence` | `u32` | Venue message sequence number. Phase 2A-1. |
 | `ts_recv` | `i64` | Capture-server timestamp (UTC ns). Phase 2A-1. |
 
 **Helper methods:**
@@ -289,7 +306,7 @@ Enriched options event type and day-level context.
 
 ### src/loader.rs
 
-Streaming loader for OPRA CMBP-1 `.dbn.zst` files.
+Streaming loader for configured OPRA quote `.dbn.zst` files. It supports CMBP-1/TCBBO and CBBO-1s/1m; contract identity is resolved from embedded DBN metadata/symbology, not from the separately retained OPRA Definition or Statistics parents.
 
 **Constants:**
 
@@ -342,7 +359,7 @@ Single-pass profiling engine. Orchestrates file discovery, day processing, event
 
 **Event enrichment (inside run()):**
 
-The dispatch loop reads ALL 18 non-reserved record fields (Phase 2A-1; was 19 until the dead `sequence` was dropped on 2026-08-01 -- dbn 0.21.0 reclassified those bytes as reserved and no tracker ever read the value), increments `ProfileDiagnostics` counters at every decision point (Phase 2A-2), and computes `time_regime()` from `hft_statistics` (Phase 2A-4). Every record is accounted for via the conservation law: `total_decoded == unknown_instrument + dispatched`.
+The dispatch loop reads ALL 18 non-reserved record fields (Phase 2A-1; was 19 until the dead `sequence` was dropped on 2026-08-01 -- dbn 0.21.0 reclassified those bytes as reserved and no tracker ever read the value), increments `ProfileDiagnostics` counters at every decision point (Phase 2A-2), and computes `time_regime()` from `hft_statistics` using `record.ts_event` (Phase 2A-4). Every tracker also keys its intraday curves from `OptionsEvent.ts_event`; `ts_recv` is retained but is not the profiler's analytic clock. Every record is accounted for via the conservation law: `total_decoded == unknown_instrument + dispatched`.
 
 Key detail: `underlying_estimate` is computed **per event** by linear open→close interpolation on RTH session progress (pre-market events → `underlying_open`; post-market → `underlying_close`; RTH → `open + progress × (close − open)`). This is the FIND-UFO partial fix (commit `5eb31cc`); the intraday path remains invisible — see D1.
 
@@ -381,6 +398,8 @@ Key detail: `underlying_estimate` is computed **per event** by linear open→clo
 ```
 
 Counter/runtime values above are illustrative (each run records its own). The two schema-version fields track code constants — `OUTPUT_SCHEMA_VERSION` in `profiler.rs` and `PROFILER_DIAGNOSTICS_SCHEMA_VERSION` in `diagnostics.rs` — verify against the constants, not this snippet.
+
+This block is bounded observability, not complete data lineage. It does not contain the resolved input-file list or hashes, catalog release identity, or producer Git SHA. Moreover, `write_output` currently hardcodes `schema` to `cmbp-1`, including for CBBO input. Exact reuse therefore requires an external receipt that binds the run to immutable raw-object identities and the executable revision.
 
 ---
 
@@ -1129,4 +1148,4 @@ output_opra_nvda/
     09_OsRatio.json            # non-tracker aggregate, when [os_ratio].enabled (§5.9)
 ```
 
-Each per-tracker JSON contains the tracker's report object plus an injected `_provenance` object with full config, runtime stats, and version; the trailing `NN_OsRatio.json` (the non-tracker O/S aggregate, §5.9) carries the same `_provenance`.
+Each per-tracker JSON contains the tracker's report object plus an injected `_provenance` object with full config, runtime stats, and version; the trailing `NN_OsRatio.json` (the non-tracker O/S aggregate, §5.9) carries the same `_provenance`. This metadata is insufficient to reconstruct the exact input population without an external file/hash/release receipt, and the emitted `schema` value is currently hardcoded to `cmbp-1`.
