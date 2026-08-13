@@ -145,8 +145,20 @@ pub fn run(
         // open and close using session progress. This captures directional drift
         // (e.g., $194→$183 on earnings day) instead of freezing at open.
         // Full fix requires intraday EQUS feed at 1s/1m resolution (Axis L).
+        // Both bounds are ET wall-clock hours converted ONCE: UTC = local - offset,
+        // and `utc_offset_for_date` returns -4 (EDT) / -5 (EST).
+        //
+        // DEFECT FIXED 2026-08-14: the open bound was written `14 - utc_offset`.
+        // 14:30 is 09:30 ET ALREADY EXPRESSED IN UTC under EST, so subtracting the
+        // offset again applied the conversion twice: (14 - (-4)) = 18:30 UTC = 14:30 ET
+        // (EDT), (14 - (-5)) = 19:30 UTC = 14:30 ET (EST). The close bound was always
+        // correct — it converts an ET hour once — so the defect is ASYMMETRIC and the
+        // window was 14:30-16:00 ET, 1.5h of the 6.5h session. Consequence: every event
+        // before 14:30 ET took the `event_tod_ns <= rth_open_utc_ns` branch and froze
+        // `underlying_estimate` at `underlying_open`, and the surviving 1.5h ran the
+        // open->close drift 4.33x too fast because `rth_duration_ns` shrank with it.
         let rth_open_utc_ns: i64 =
-            (14 - utc_offset as i64) * 3600 * 1_000_000_000 + 30 * 60 * 1_000_000_000; // 09:30 ET in UTC ns-since-midnight
+            (9 - utc_offset as i64) * 3600 * 1_000_000_000 + 30 * 60 * 1_000_000_000; // 09:30 ET in UTC ns-since-midnight
         let rth_close_utc_ns: i64 = (16 - utc_offset as i64) * 3600 * 1_000_000_000; // 16:00 ET
         let rth_duration_ns: f64 = (rth_close_utc_ns - rth_open_utc_ns) as f64;
 
